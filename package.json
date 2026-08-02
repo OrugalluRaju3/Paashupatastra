@@ -1,0 +1,33 @@
+{
+  "name": "paashupatastra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Paashupatastra — community services super app",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/admin"
+  ],
+  "scripts": {
+    "build": "npm run build -w @paashupatastra/shared-models && npm run build -w @paashupatastra/database && npm run build -w @paashupatastra/service-kit && npm run build --workspaces --if-present",
+    "build:shared": "npm run build -w @paashupatastra/shared-models && npm run build -w @paashupatastra/database && npm run build -w @paashupatastra/service-kit",
+    "db:init": "node scripts/init-db.js",
+    "db:sync": "npm run schema:sync -w @paashupatastra/database",
+    "dev:auth": "npm run dev -w @paashupatastra/auth",
+    "dev:users": "npm run dev -w @paashupatastra/users",
+    "dev:communities": "npm run dev -w @paashupatastra/communities",
+    "dev:parking": "npm run dev -w @paashupatastra/parking",
+    "dev:payments": "npm run dev -w @paashupatastra/payments",
+    "dev:notifications": "npm run dev -w @paashupatastra/notifications",
+    "dev:gateway": "npm run dev -w @paashupatastra/gateway",
+    "dev:admin": "npm run dev -w @paashupatastra/admin",
+    "dev:services": "npm run dev -w @paashupatastra/auth & npm run dev -w @paashupatastra/users & npm run dev -w @paashupatastra/communities & npm run dev -w @paashupatastra/parking & npm run dev -w @paashupatastra/payments & npm run dev -w @paashupatastra/notifications & npm run dev -w @paashupatastra/gateway",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "author": "",
+  "license": "UNLICENSED"
+}

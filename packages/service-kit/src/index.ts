@@ -1,0 +1,103 @@
+import fs from "node:fs";
+import path from "node:path";
+import dotenv from "dotenv";
+import Fastify, { type FastifyInstance } from "fastify";
+import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
+
+export function loadEnv(): void {
+  const candidates = [
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(process.cwd(), "../../.env"),
+    path.resolve(__dirname, "../../../.env"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      dotenv.config({ path: candidate });
+      return;
+    }
+  }
+}
+
+export type CreateServiceOptions = {
+  name: string;
+  port: number;
+  host?: string;
+  registerRoutes: (app: FastifyInstance) => Promise<void> | void;
+};
+
+export async function createService(options: CreateServiceOptions): Promise<FastifyInstance> {
+  loadEnv();
+
+  const app = Fastify({
+    logger: {
+      level: process.env.LOG_LEVEL ?? "info",
+    },
+  });
+
+  await app.register(cors, { origin: true });
+  await app.register(helmet);
+
+  app.get("/health", async () => ({
+    status: "ok" as const,
+    service: options.name,
+    timestamp: new Date().toISOString(),
+  }));
+
+  await options.registerRoutes(app);
+
+  await app.listen({
+    port: options.port,
+    host: options.host ?? "0.0.0.0",
+  });
+
+  app.log.info(`${options.name} listening on ${options.port}`);
+  return app;
+}
+
+export function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+export function envString(name: string, fallback?: string): string {
+  const raw = process.env[name];
+  if (raw && raw.length > 0) return raw;
+  if (fallback !== undefined) return fallback;
+  throw new Error(`Missing required env: ${name}`);
+}
+
+export function getUserIdFromHeaders(headers: Record<string, unknown>): string | null {
+  const explicit = headers["x-user-id"];
+  if (typeof explicit === "string" && explicit.length > 0) return explicit;
+
+  const auth = headers.authorization;
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return null;
+  try {
+    const token = auth.slice("Bearer ".length);
+    const json = Buffer.from(token, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { sub?: string };
+    return payload.sub ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function getRolesFromHeaders(headers: Record<string, unknown>): string[] {
+  const explicit = headers["x-user-roles"];
+  if (typeof explicit === "string" && explicit.length > 0) {
+    return explicit.split(",").map((r) => r.trim()).filter(Boolean);
+  }
+  const auth = headers.authorization;
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return [];
+  try {
+    const token = auth.slice("Bearer ".length);
+    const json = Buffer.from(token, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { roles?: string[] };
+    return payload.roles ?? [];
+  } catch {
+    return [];
+  }
+}
