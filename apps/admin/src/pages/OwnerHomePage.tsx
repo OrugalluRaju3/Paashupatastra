@@ -32,6 +32,9 @@ export function OwnerHomePage() {
             <li>When a customer pays, you get minimal customer details + a check-in OTP.</li>
             <li>Share the OTP only when they arrive so they can check in.</li>
             <li>
+              After a booking is paid/confirmed, use Chat on Bookings to message the customer.
+            </li>
+            <li>
               If a customer never checks in after their start time, they get reminders every 5
               minutes until check-out time; then the booking auto-completes and payout (minus
               platform fee) credits your wallet.

@@ -32,6 +32,10 @@ export function CustomerHomePage() {
             <li>Pay — amount goes to the platform wallet and the slot is held for you.</li>
             <li>On arrival, get the OTP from the owner and check in.</li>
             <li>
+              After payment is confirmed, use Chat on My bookings to message the owner about arrival
+              and access.
+            </li>
+            <li>
               If check-in time has started but you never check in, you get reminders every 5 minutes
               until check-out time. Then the booking is marked completed and payment goes to the
               owner.

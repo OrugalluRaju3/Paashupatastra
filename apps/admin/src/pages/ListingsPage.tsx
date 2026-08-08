@@ -41,7 +41,13 @@ type ListingDetail = {
   listing: Listing;
   documents: Array<{ id: string; type: string; fileUrl: string; status: string }>;
   assignments: Array<{ id: string; status: string; executiveUserId: string }>;
-  reports: Array<{ id: string; decision: string; comments: string }>;
+  reports: Array<{
+    id: string;
+    decision: string;
+    comments: string;
+    photoUrls?: string[] | null;
+    createdAt?: string;
+  }>;
 };
 
 type Paginated<T> = {
@@ -703,10 +709,47 @@ export function ListingsPage() {
               ) : null}
             </div>
             <div>
-              <strong>Assignments / reports</strong>
+              <strong>Assignments / field reports</strong>
               <p>
                 {detail?.assignments?.length ?? 0} assignments · {detail?.reports?.length ?? 0} reports
               </p>
+              {detail?.reports?.length ? (
+                <div className="field-report-photos" style={{ marginTop: "0.65rem" }}>
+                  {detail.reports.map((report, index) => {
+                    const photos = Array.isArray(report.photoUrls)
+                      ? report.photoUrls.filter(Boolean)
+                      : [];
+                    return (
+                      <div key={report.id} className="report-block">
+                        <p className="report-meta">
+                          Report #{index + 1} · {report.decision.replaceAll("_", " ")}
+                          {report.createdAt
+                            ? ` · ${new Date(report.createdAt).toLocaleString("en-IN")}`
+                            : ""}
+                        </p>
+                        {report.comments ? (
+                          <p className="report-comments">{report.comments}</p>
+                        ) : null}
+                        {photos.length ? (
+                          <ul className="photo-links">
+                            {photos.map((url, photoIndex) => (
+                              <li key={`${report.id}-${photoIndex}`}>
+                                <a href={url} target="_blank" rel="noreferrer">
+                                  View file {photoIndex + 1}
+                                </a>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="auth-hint" style={{ margin: 0 }}>
+                            No files attached.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
           </div>
         </Modal>

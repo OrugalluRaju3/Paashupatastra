@@ -174,6 +174,12 @@ export const createBookingV2Schema = z.object({
 
 export type CreateBookingV2Input = z.infer<typeof createBookingV2Schema>;
 
+export const bookingChatMessageSchema = z.object({
+  body: z.string().trim().min(1).max(2000),
+});
+
+export type BookingChatMessageInput = z.infer<typeof bookingChatMessageSchema>;
+
 export const documentUploadMetaSchema = z.object({
   type: documentTypeSchema,
   fileUrl: uploadedFileRefSchema,

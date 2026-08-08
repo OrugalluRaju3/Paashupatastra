@@ -85,8 +85,18 @@ export function VerificationPage() {
   const [assignListingId, setAssignListingId] = useState("");
   const [executiveId, setExecutiveId] = useState("");
   const [reportAssignmentId, setReportAssignmentId] = useState("");
-  const [fieldPhotoUrl, setFieldPhotoUrl] = useState("");
+  const [fieldPhotoUrls, setFieldPhotoUrls] = useState<string[]>([]);
   const [managerListingId, setManagerListingId] = useState("");
+  const [managerReports, setManagerReports] = useState<
+    Array<{
+      id: string | number;
+      decision: string;
+      comments: string;
+      photoUrls?: string[] | null;
+      createdAt?: string;
+    }>
+  >([]);
+  const [managerReportsLoading, setManagerReportsLoading] = useState(false);
   const [comments, setComments] = useState("");
 
   useEffect(() => {
@@ -167,13 +177,13 @@ export function VerificationPage() {
   }
 
   function openFieldReport(assignmentId: string) {
-    setFieldPhotoUrl("");
+    setFieldPhotoUrls([]);
     setComments("");
     setReportAssignmentId(assignmentId);
   }
 
   async function submitFieldReport(decision: "approve" | "reject") {
-    if (!fieldPhotoUrl) {
+    if (fieldPhotoUrls.length === 0) {
       toast.error("Upload at least one field verification photo");
       return;
     }
@@ -191,7 +201,7 @@ export function VerificationPage() {
         assignmentId: reportAssignmentId,
         decision,
         comments: reason,
-        photoUrls: [fieldPhotoUrl],
+        photoUrls: fieldPhotoUrls,
         addressVerified: true,
         ownershipVerified: true,
         slotVerified: true,
@@ -199,7 +209,7 @@ export function VerificationPage() {
         gpsVerified: true,
       });
       setReportAssignmentId("");
-      setFieldPhotoUrl("");
+      setFieldPhotoUrls([]);
       setComments("");
       toast.success(
         decision === "approve" ? "Field report sent to manager" : "Request rejected",
@@ -207,6 +217,29 @@ export function VerificationPage() {
       await loadTab();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Report failed");
+    }
+  }
+
+  async function openManagerDecide(listingId: string) {
+    setComments("");
+    setManagerListingId(listingId);
+    setManagerReports([]);
+    setManagerReportsLoading(true);
+    try {
+      const res = await api.get<{
+        reports: Array<{
+          id: string | number;
+          decision: string;
+          comments: string;
+          photoUrls?: string[] | null;
+          createdAt?: string;
+        }>;
+      }>(`/parking/listings/${listingId}`);
+      setManagerReports(Array.isArray(res.reports) ? res.reports : []);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load field report files");
+    } finally {
+      setManagerReportsLoading(false);
     }
   }
 
@@ -231,6 +264,7 @@ export function VerificationPage() {
         comments: reason,
       });
       setManagerListingId("");
+      setManagerReports([]);
       setComments("");
       toast.success(
         decision === "approve"
@@ -388,8 +422,7 @@ export function VerificationPage() {
                 type="button"
                 className="btn btn-primary"
                 onClick={() => {
-                  setComments("");
-                  setManagerListingId(String(item.id));
+                  void openManagerDecide(String(item.id));
                 }}
               >
                 {tab === "needs_info" ? "Follow up" : "Decide"}
@@ -565,11 +598,12 @@ export function VerificationPage() {
           }
         >
           <FileUploadField
-            label="Site verification photo"
+            label="Site verification photos"
             required
-            value={fieldPhotoUrl}
-            onChange={setFieldPhotoUrl}
-            hint="Upload a photo from the field visit"
+            multiple
+            value={fieldPhotoUrls}
+            onChange={setFieldPhotoUrls}
+            hint="Upload one or more photos from the field visit. You can select multiple files at once."
           />
           <div className="field">
             <label htmlFor="field-report-comments">
@@ -591,10 +625,20 @@ export function VerificationPage() {
       {managerListingId && canManageReview ? (
         <Modal
           title="Manager decision"
-          onClose={() => setManagerListingId("")}
+          onClose={() => {
+            setManagerListingId("");
+            setManagerReports([]);
+          }}
           footer={
             <>
-              <button type="button" className="btn btn-ghost" onClick={() => setManagerListingId("")}>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => {
+                  setManagerListingId("");
+                  setManagerReports([]);
+                }}
+              >
                 Cancel
               </button>
               <button type="button" className="btn btn-danger" onClick={() => void managerDecide("reject")}>
@@ -616,6 +660,48 @@ export function VerificationPage() {
             </>
           }
         >
+          <div className="field-report-photos">
+            <h4>Field executive uploads</h4>
+            {managerReportsLoading ? <p className="loading">Loading field files…</p> : null}
+            {!managerReportsLoading && managerReports.length === 0 ? (
+              <p className="auth-hint" style={{ margin: 0 }}>
+                No field reports found for this request yet.
+              </p>
+            ) : null}
+            {!managerReportsLoading
+              ? managerReports.map((report, index) => {
+                  const photos = Array.isArray(report.photoUrls)
+                    ? report.photoUrls.filter(Boolean)
+                    : [];
+                  return (
+                    <div key={String(report.id)} className="report-block">
+                      <p className="report-meta">
+                        Report #{index + 1} · {report.decision.replaceAll("_", " ")}
+                        {report.createdAt
+                          ? ` · ${new Date(report.createdAt).toLocaleString("en-IN")}`
+                          : ""}
+                      </p>
+                      {report.comments ? <p className="report-comments">{report.comments}</p> : null}
+                      {photos.length ? (
+                        <ul className="photo-links">
+                          {photos.map((url, photoIndex) => (
+                            <li key={`${report.id}-${photoIndex}`}>
+                              <a href={url} target="_blank" rel="noreferrer">
+                                View file {photoIndex + 1}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="auth-hint" style={{ margin: 0 }}>
+                          No files attached to this report.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })
+              : null}
+          </div>
           <div className="field">
             <label htmlFor="manager-decision-comments">
               Comments / rejection reason <span style={{ color: "var(--danger, #b42318)" }}>*</span>

@@ -6,6 +6,7 @@ import { CommissionConfigEntity } from "./entities/commission-config.entity";
 import { NotificationLogEntity } from "./entities/notification-log.entity";
 import { OtpChallengeEntity } from "./entities/otp-challenge.entity";
 import { ParkingBookingEntity } from "./entities/parking-booking.entity";
+import { ParkingBookingMessageEntity } from "./entities/parking-booking-message.entity";
 import { ParkingListingEntity } from "./entities/parking-listing.entity";
 import { ParkingSlotEntity } from "./entities/parking-slot.entity";
 import { UserDocumentEntity } from "./entities/user-document.entity";
@@ -34,6 +35,7 @@ export const allEntities = [
   ParkingSlotEntity,
   ParkingListingEntity,
   ParkingBookingEntity,
+  ParkingBookingMessageEntity,
   VerificationAssignmentEntity,
   VerificationReportEntity,
   WalletEntity,

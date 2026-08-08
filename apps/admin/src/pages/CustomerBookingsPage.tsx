@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api, formatInrFromPaise, qs } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import { BookingChatModal } from "../components/BookingChatModal";
 import { Modal } from "../components/Modal";
 import { ParkingNavigationMap } from "../components/ParkingNavigationMap";
 import { StatusBadge } from "../components/StatusBadge";
@@ -63,6 +64,10 @@ function canNavigate(status: string) {
   return status === "confirmed" || status === "checked_in";
 }
 
+function canChat(status: string) {
+  return status === "confirmed" || status === "checked_in" || status === "completed";
+}
+
 function listingAddress(listing: Booking["listing"]) {
   if (!listing) return "";
   return [listing.addressLine, listing.city, listing.state, listing.pinCode].filter(Boolean).join(", ");
@@ -75,6 +80,7 @@ export function CustomerBookingsPage() {
   const [checkInId, setCheckInId] = useState<string | null>(null);
   const [navBooking, setNavBooking] = useState<Booking | null>(null);
   const [viewBooking, setViewBooking] = useState<Booking | null>(null);
+  const [chatBooking, setChatBooking] = useState<Booking | null>(null);
   const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
   const [listLoading, setListLoading] = useState(true);
@@ -244,6 +250,15 @@ export function CustomerBookingsPage() {
                           Pay
                         </button>
                       ) : null}
+                      {canChat(b.status) ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setChatBooking(b)}
+                        >
+                          Chat
+                        </button>
+                      ) : null}
                       {canNavigate(b.status) ? (
                         <button
                           type="button"
@@ -297,6 +312,18 @@ export function CustomerBookingsPage() {
           onClose={() => setViewBooking(null)}
           footer={
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              {canChat(viewBooking.status) ? (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setChatBooking(viewBooking);
+                    setViewBooking(null);
+                  }}
+                >
+                  Chat with owner
+                </button>
+              ) : null}
               {canNavigate(viewBooking.status) ? (
                 <button
                   type="button"
@@ -455,6 +482,15 @@ export function CustomerBookingsPage() {
             </div>
           </form>
         </Modal>
+      ) : null}
+
+      {chatBooking ? (
+        <BookingChatModal
+          bookingId={String(chatBooking.id)}
+          title={`Chat · Booking #${chatBooking.id}`}
+          peerLabel="owner"
+          onClose={() => setChatBooking(null)}
+        />
       ) : null}
 
       {navBooking ? (

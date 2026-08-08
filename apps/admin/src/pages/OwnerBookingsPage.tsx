@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, formatInrFromPaise, qs } from "../api";
+import { BookingChatModal } from "../components/BookingChatModal";
 import { KpiCard } from "../components/KpiCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
@@ -29,9 +30,14 @@ type Booking = {
   } | null;
 };
 
+function canChat(status: string) {
+  return status === "confirmed" || status === "checked_in" || status === "completed";
+}
+
 export function OwnerBookingsPage() {
   const toast = useToast();
   const [items, setItems] = useState<Booking[]>([]);
+  const [chatBooking, setChatBooking] = useState<Booking | null>(null);
   const [wallet, setWallet] = useState<{
     balanceInPaise: number;
     pendingSettlementInPaise?: number;
@@ -66,8 +72,8 @@ export function OwnerBookingsPage() {
         <div>
           <h2>Customer bookings</h2>
           <p>
-            Share the check-in OTP only when the customer arrives. After check-out, payout (minus platform
-            fee) credits your wallet.
+            Share the check-in OTP only when the customer arrives. Use Chat after payment to
+            coordinate. After check-out, payout (minus platform fee) credits your wallet.
           </p>
         </div>
         <div style={{ display: "flex", gap: "0.5rem" }}>
@@ -106,6 +112,7 @@ export function OwnerBookingsPage() {
                 <th>OTP</th>
                 <th>Payment</th>
                 <th>Status</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -150,11 +157,24 @@ export function OwnerBookingsPage() {
                   <td>
                     <StatusBadge status={b.status} />
                   </td>
+                  <td>
+                    {canChat(b.status) ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setChatBooking(b)}
+                      >
+                        Chat
+                      </button>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                 </tr>
               ))}
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="empty">
+                  <td colSpan={7} className="empty">
                     No customer bookings yet.
                   </td>
                 </tr>
@@ -163,6 +183,15 @@ export function OwnerBookingsPage() {
           </table>
         </div>
       </section>
+
+      {chatBooking ? (
+        <BookingChatModal
+          bookingId={String(chatBooking.id)}
+          title={`Chat · Booking #${chatBooking.id}`}
+          peerLabel="customer"
+          onClose={() => setChatBooking(null)}
+        />
+      ) : null}
     </>
   );
 }

@@ -8,6 +8,7 @@ export { ApartmentEntity } from "./entities/apartment.entity";
 export { ParkingSlotEntity } from "./entities/parking-slot.entity";
 export { ParkingListingEntity } from "./entities/parking-listing.entity";
 export { ParkingBookingEntity } from "./entities/parking-booking.entity";
+export { ParkingBookingMessageEntity } from "./entities/parking-booking-message.entity";
 export { VerificationAssignmentEntity } from "./entities/verification-assignment.entity";
 export { VerificationReportEntity } from "./entities/verification-report.entity";
 export { WalletEntity } from "./entities/wallet.entity";

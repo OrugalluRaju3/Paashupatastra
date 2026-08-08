@@ -4,6 +4,7 @@ import {
   CommissionConfigEntity,
   NotificationLogEntity,
   ParkingBookingEntity,
+  ParkingBookingMessageEntity,
   ParkingListingEntity,
   ParkingSlotEntity,
   UserDocumentEntity,
@@ -22,6 +23,7 @@ import {
   PaymentStatus,
   UserRole,
   assignVerificationSchema,
+  bookingChatMessageSchema,
   createBookingV2Schema,
   createParkingBookingSchema,
   createParkingSlotSchema,
@@ -196,6 +198,26 @@ function serializeBooking(row: ParkingBookingEntity) {
     checkedOutAt: toIso(row.checkedOutAt),
     createdAt: toIsoRequired(row.createdAt),
     updatedAt: toIsoRequired(row.updatedAt),
+  };
+}
+
+function canChatOnBooking(status: string) {
+  return status === BookingStatus.CONFIRMED || status === BookingStatus.CHECKED_IN;
+}
+
+function serializeBookingMessage(
+  row: ParkingBookingMessageEntity,
+  senderName: string | null,
+  currentUserId: number,
+) {
+  return {
+    id: row.id,
+    bookingId: row.bookingId,
+    senderUserId: row.senderUserId,
+    senderName,
+    body: row.body,
+    mine: row.senderUserId === currentUserId,
+    createdAt: toIsoRequired(row.createdAt),
   };
 }
 
@@ -558,10 +580,29 @@ async function main() {
   const assignmentRepo = ds.getRepository(VerificationAssignmentEntity);
   const reportRepo = ds.getRepository(VerificationReportEntity);
   const bookingRepo = ds.getRepository(ParkingBookingEntity);
+  const messageRepo = ds.getRepository(ParkingBookingMessageEntity);
   const slotRepo = ds.getRepository(ParkingSlotEntity);
   const docRepo = ds.getRepository(UserDocumentEntity);
   const bankRepo = ds.getRepository(BankAccountEntity);
   const userRepo = ds.getRepository(UserEntity);
+
+  await ds.query(`
+    CREATE TABLE IF NOT EXISTS parking_booking_messages (
+      id SERIAL PRIMARY KEY,
+      booking_id INT NOT NULL,
+      sender_user_id INT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await ds.query(`
+    CREATE INDEX IF NOT EXISTS idx_parking_booking_messages_booking_id
+    ON parking_booking_messages (booking_id)
+  `);
+  await ds.query(`
+    CREATE INDEX IF NOT EXISTS idx_parking_booking_messages_sender_user_id
+    ON parking_booking_messages (sender_user_id)
+  `);
 
   await createService({
     name: "parking",
@@ -897,11 +938,71 @@ async function main() {
 
         await notify(ds, {
           userId: user.id,
+          toEmail: user.email,
+          toPhone: user.phone,
           title: "Application submitted",
-          body: "Your parking registration is Pending Verification. A field executive will be assigned within 24 hours.",
+          body: [
+            `Hello ${user.name ?? "Owner"},`,
+            "",
+            "Your parking registration is Pending Verification.",
+            "",
+            `• Apartment: ${listing.apartmentName}`,
+            `• Slot: ${listing.parkingSlotNumber}`,
+            `• City: ${listing.city}${listing.pinCode ? ` · PIN ${listing.pinCode}` : ""}`,
+            `• Address: ${listing.addressLine}`,
+            "",
+            "A field executive will be assigned within 24 hours.",
+            "",
+            "— Paashupatastra",
+          ].join("\n"),
           referenceType: "parking_listing",
           referenceId: listing.id,
         });
+
+        const staffRecipients = await userRepo
+          .createQueryBuilder("u")
+          .where("u.is_active = true")
+          .andWhere(
+            `(:psa = ANY(u.roles) OR :sa = ANY(u.roles) OR :vm = ANY(u.roles))`,
+            {
+              psa: UserRole.PARKING_SUPER_ADMIN,
+              sa: UserRole.SUPER_ADMIN,
+              vm: UserRole.VERIFICATION_MANAGER,
+            },
+          )
+          .getMany();
+
+        const staffTitle = "New parking request submitted";
+        const staffBody = [
+          "An owner submitted a new parking request for verification.",
+          "",
+          `• Request ID: ${listing.id}`,
+          `• Apartment: ${listing.apartmentName}`,
+          `• Flat: ${listing.flatNumber}${listing.blockTower ? ` · Block ${listing.blockTower}` : ""}`,
+          `• Slot: ${listing.parkingSlotNumber}`,
+          `• City: ${listing.city}${listing.pinCode ? ` · PIN ${listing.pinCode}` : ""}`,
+          `• Address: ${listing.addressLine}`,
+          `• Owner: ${user.name ?? "—"} · ${user.phone}${user.email ? ` · ${user.email}` : ""}`,
+          `• Status: ${ListingStatus.PENDING_VERIFICATION}`,
+          "",
+          "Open Verification to assign a field executive.",
+          "",
+          "— Paashupatastra",
+        ].join("\n");
+
+        await Promise.allSettled(
+          staffRecipients.map((staff) =>
+            notify(ds, {
+              userId: staff.id,
+              toEmail: staff.email,
+              toPhone: staff.phone,
+              title: staffTitle,
+              body: `Hello ${staff.name ?? "Team"},\n\n${staffBody}`,
+              referenceType: "parking_listing",
+              referenceId: listing.id,
+            }),
+          ),
+        );
 
         return reply.code(201).send({
           listing: serializeListing(listing),
@@ -2373,6 +2474,118 @@ async function main() {
           settlement,
           settlementError,
         };
+      });
+
+      app.get("/v1/parking/bookings/:id/messages", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        if (!actorId) {
+          return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+        }
+        const booking = await bookingRepo.findOne({ where: { id } });
+        if (!booking) {
+          return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
+        }
+        if (booking.renterUserId !== actorId && booking.ownerUserId !== actorId) {
+          return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not allowed" } });
+        }
+        if (
+          !canChatOnBooking(booking.status) &&
+          booking.status !== BookingStatus.COMPLETED
+        ) {
+          return reply.code(400).send({
+            error: {
+              code: "CHAT_UNAVAILABLE",
+              message: "Chat is available after the booking is confirmed",
+            },
+          });
+        }
+
+        const rows = await messageRepo.find({
+          where: { bookingId: booking.id },
+          order: { createdAt: "ASC", id: "ASC" },
+          take: 200,
+        });
+        const senderIds = [...new Set(rows.map((r) => r.senderUserId))];
+        const senders =
+          senderIds.length > 0
+            ? await userRepo.find({ where: { id: In(senderIds) } })
+            : [];
+        const nameById = new Map(senders.map((u) => [u.id, u.name ?? null]));
+
+        return {
+          bookingId: booking.id,
+          canSend: canChatOnBooking(booking.status),
+          items: rows.map((row) =>
+            serializeBookingMessage(row, nameById.get(row.senderUserId) ?? null, actorId),
+          ),
+        };
+      });
+
+      app.post("/v1/parking/bookings/:id/messages", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        if (!actorId) {
+          return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+        }
+        const body = bookingChatMessageSchema.parse(request.body);
+        const booking = await bookingRepo.findOne({ where: { id } });
+        if (!booking) {
+          return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
+        }
+        if (booking.renterUserId !== actorId && booking.ownerUserId !== actorId) {
+          return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not allowed" } });
+        }
+        if (!canChatOnBooking(booking.status)) {
+          return reply.code(400).send({
+            error: {
+              code: "CHAT_CLOSED",
+              message: "Chat is only open while the booking is confirmed or checked in",
+            },
+          });
+        }
+
+        const saved = await messageRepo.save(
+          messageRepo.create({
+            bookingId: booking.id,
+            senderUserId: actorId,
+            body: body.body,
+          }),
+        );
+
+        const sender = await userRepo.findOne({ where: { id: actorId } });
+        const peerId =
+          actorId === booking.renterUserId ? booking.ownerUserId : booking.renterUserId;
+        if (peerId) {
+          const peer = await userRepo.findOne({ where: { id: peerId } });
+          if (peer) {
+            const preview =
+              body.body.length > 140 ? `${body.body.slice(0, 140)}…` : body.body;
+            await notify(ds, {
+              userId: peer.id,
+              toEmail: peer.email,
+              toPhone: peer.phone,
+              title: `New chat message — booking #${booking.id}`,
+              body: [
+                `Hello ${peer.name ?? "there"},`,
+                "",
+                `${sender?.name ?? "Someone"} sent a message about booking #${booking.id}:`,
+                "",
+                preview,
+                "",
+                "Open the booking Chat in the app to reply.",
+                "",
+                "— Paashupatastra",
+              ].join("\n"),
+              referenceType: "parking_booking_message",
+              referenceId: saved.id,
+            });
+          }
+        }
+
+        return reply.code(201).send(
+          serializeBookingMessage(saved, sender?.name ?? null, actorId),
+        );
       });
 
       app.get("/v1/parking/bookings", async (request, reply) => {
