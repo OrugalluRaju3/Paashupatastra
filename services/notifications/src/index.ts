@@ -7,17 +7,12 @@ import {
   toIso,
   toIsoRequired,
 } from "@paashupatastra/database";
-import {
-  createService,
-  envInt,
-  getUserIdFromHeaders,
-  loadEnv,
-} from "@paashupatastra/service-kit";
+import { createService, envInt, getUserIdFromHeaders, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import { paginationQuerySchema, sendEmailNotificationSchema } from "@paashupatastra/shared-models";
 import { z } from "zod";
 
 const sendNotificationSchema = z.object({
-  userId: z.string().uuid().optional().nullable(),
+  userId: z.coerce.number().int().positive().optional().nullable(),
   title: z.string().min(1).max(160),
   body: z.string().min(1).max(8000),
   channel: z.enum(["push", "sms", "email", "in_app"]).default("push"),
@@ -25,7 +20,7 @@ const sendNotificationSchema = z.object({
   toPhone: z.string().optional(),
   data: z.record(z.string()).optional(),
   referenceType: z.string().max(40).optional().nullable(),
-  referenceId: z.string().uuid().optional().nullable(),
+  referenceId: z.coerce.number().int().positive().optional().nullable(),
   skipLog: z.boolean().optional().default(false),
 });
 
@@ -109,12 +104,12 @@ async function main() {
     port: envInt("NOTIFICATIONS_PORT", 3006),
     registerRoutes: async (app) => {
       async function deliverEmail(input: {
-        userId?: string | null;
+        userId?: number | null;
         toEmail: string;
         title: string;
         body: string;
         referenceType?: string | null;
-        referenceId?: string | null;
+        referenceId?: number | null;
         skipLog?: boolean;
       }) {
         let status = "queued";
@@ -137,7 +132,7 @@ async function main() {
 
         if (input.skipLog) {
           return {
-            id: null as string | null,
+            id: null as number | null,
             status,
             smtpSent,
             outboxPath,
@@ -168,7 +163,7 @@ async function main() {
       }
 
       app.get("/v1/notifications/me", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -203,11 +198,11 @@ async function main() {
       });
 
       app.post("/v1/notifications/:id/read", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const row = await logRepo.findOne({ where: { id, userId } });
         if (!row) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Notification not found" } });
@@ -220,7 +215,7 @@ async function main() {
       });
 
       app.post("/v1/notifications/read-all", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }

@@ -6,14 +6,14 @@ import {
   PrimaryGeneratedColumn,
 } from "typeorm";
 
-@Entity({ name: "notification_logs" })
+@Entity({ name: "notifications" })
 export class NotificationLogEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "user_id", type: "uuid", nullable: true })
-  userId!: string | null;
+  @Column({ name: "user_id", type: "int", nullable: true })
+  userId!: number | null;
 
   @Column({ type: "varchar", length: 20 })
   channel!: string;
@@ -30,8 +30,8 @@ export class NotificationLogEntity {
   @Column({ name: "reference_type", type: "varchar", length: 40, nullable: true })
   referenceType!: string | null;
 
-  @Column({ name: "reference_id", type: "uuid", nullable: true })
-  referenceId!: string | null;
+  @Column({ name: "reference_id", type: "int", nullable: true })
+  referenceId!: number | null;
 
   @Column({ name: "read_at", type: "timestamptz", nullable: true })
   readAt!: Date | null;

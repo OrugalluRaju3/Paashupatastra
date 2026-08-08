@@ -9,16 +9,16 @@ import {
 
 @Entity({ name: "parking_slots" })
 export class ParkingSlotEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "apartment_id", type: "uuid" })
-  apartmentId!: string;
+  @Column({ name: "apartment_id", type: "int" })
+  apartmentId!: number;
 
   @Index()
-  @Column({ name: "owner_user_id", type: "uuid" })
-  ownerUserId!: string;
+  @Column({ name: "owner_user_id", type: "int" })
+  ownerUserId!: number;
 
   @Column({ type: "varchar", length: 120 })
   title!: string;

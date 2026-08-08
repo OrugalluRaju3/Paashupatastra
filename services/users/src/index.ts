@@ -11,12 +11,7 @@ import {
   getDataSource,
   toIsoRequired,
 } from "@paashupatastra/database";
-import {
-  createService,
-  envInt,
-  getUserIdFromHeaders,
-  loadEnv,
-} from "@paashupatastra/service-kit";
+import { createService, envInt, getRolesFromHeaders, getUserIdFromHeaders, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import {
   DocumentType,
   UserRole,
@@ -30,7 +25,7 @@ import {
   userRoleSchema,
   bankAccountInputSchema,
 } from "@paashupatastra/shared-models";
-import { type Repository } from "typeorm";
+import { In, type Repository } from "typeorm";
 import { z } from "zod";
 
 const UPLOADS_DIR = path.resolve(process.cwd(), "uploads");
@@ -46,16 +41,93 @@ const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const ROLE_LABEL: Record<string, string> = {
   [UserRole.VERIFICATION_MANAGER]: "Verification Manager",
   [UserRole.FIELD_EXECUTIVE]: "Field Executive",
+  [UserRole.PARKING_SUPER_ADMIN]: "Parking Super Admin",
   [UserRole.SUPER_ADMIN]: "Super Admin",
 };
 
+const MANAGER_ROLES = new Set<string>([
+  UserRole.VERIFICATION_MANAGER,
+  UserRole.PARKING_SUPER_ADMIN,
+  UserRole.SUPER_ADMIN,
+]);
+
+function notificationsBaseUrl() {
+  return (process.env.NOTIFICATIONS_URL ?? "http://localhost:3006").replace(/\/$/, "");
+}
+
+async function notifyUser(input: {
+  userId?: number | null;
+  toEmail?: string | null;
+  toPhone?: string | null;
+  title: string;
+  body: string;
+  referenceType?: string;
+  referenceId?: number;
+}) {
+  const base = notificationsBaseUrl();
+
+  if (input.userId) {
+    try {
+      await fetch(`${base}/v1/notifications/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: input.userId,
+          channel: "in_app",
+          title: input.title,
+          body: input.body,
+          referenceType: input.referenceType,
+          referenceId: input.referenceId,
+        }),
+      });
+    } catch {
+      // best-effort in-app
+    }
+  }
+
+  if (input.toEmail) {
+    try {
+      await fetch(`${base}/v1/notifications/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: input.userId ?? undefined,
+          toEmail: input.toEmail,
+          toPhone: input.toPhone ?? undefined,
+          title: input.title,
+          body: input.body,
+          referenceType: input.referenceType,
+          referenceId: input.referenceId,
+          skipLog: true,
+        }),
+      });
+    } catch {
+      // best-effort email
+    }
+  }
+}
+
+async function validateReportingManager(userRepo: Repository<UserEntity>, managerId: number) {
+  const manager = await userRepo.findOne({ where: { id: managerId } });
+  if (!manager) {
+    return { ok: false as const, message: "Reporting manager not found" };
+  }
+  if (!manager.isActive) {
+    return { ok: false as const, message: "Reporting manager is inactive" };
+  }
+  if (!manager.roles.some((r) => MANAGER_ROLES.has(r))) {
+    return {
+      ok: false as const,
+      message: "Reporting manager must be a verification manager or super admin",
+    };
+  }
+  return { ok: true as const, manager };
+}
+
 async function sendStaffInviteEmail(user: UserEntity, role: string) {
-  const notificationsUrl = (process.env.NOTIFICATIONS_URL ?? "http://localhost:3006").replace(
-    /\/$/,
-    "",
-  );
+  const notificationsUrl = notificationsBaseUrl();
   const appUrl = (process.env.APP_PUBLIC_URL ?? "http://localhost:5173").replace(/\/$/, "");
-  const loginPath = `${appUrl}/staff/login`;
+  const loginPath = `${appUrl}/staff/login/parking`;
   const roleLabel = ROLE_LABEL[role] ?? role;
 
   const body = [
@@ -109,7 +181,10 @@ async function sendStaffInviteEmail(user: UserEntity, role: string) {
   };
 }
 
-function serializeUser(user: UserEntity) {
+function serializeUser(
+  user: UserEntity,
+  manager?: Pick<UserEntity, "name" | "phone"> | null,
+) {
   return {
     id: user.id,
     phone: user.phone,
@@ -125,14 +200,30 @@ function serializeUser(user: UserEntity) {
     preferredLocation: user.preferredLocation,
     roles: user.roles,
     isActive: user.isActive,
+    deactivationReason: user.deactivationReason,
+    deactivatedAt: user.deactivatedAt ? toIsoRequired(user.deactivatedAt) : null,
+    deactivatedBy: user.deactivatedBy,
+    reportingManagerId: user.reportingManagerId,
+    reportingManagerName: manager?.name ?? null,
+    reportingManagerPhone: manager?.phone ?? null,
     createdAt: toIsoRequired(user.createdAt),
     updatedAt: toIsoRequired(user.updatedAt),
   };
 }
 
+async function loadManagersById(
+  userRepo: Repository<UserEntity>,
+  managerIds: number[],
+): Promise<Map<number, UserEntity>> {
+  const unique = [...new Set(managerIds.filter((id) => id > 0))];
+  if (unique.length === 0) return new Map();
+  const managers = await userRepo.find({ where: { id: In(unique) } });
+  return new Map(managers.map((m) => [m.id, m]));
+}
+
 async function findConflict(
   userRepo: Repository<UserEntity>,
-  opts: { phone?: string; email?: string | null; excludeId?: string },
+  opts: { phone?: string; email?: string | null; excludeId?: number },
 ) {
   if (opts.phone) {
     const byPhone = await userRepo.findOne({ where: { phone: opts.phone } });
@@ -237,8 +328,54 @@ async function main() {
 
       app.get("/v1/users", async (request) => {
         const query = paginationQuerySchema.parse(request.query);
-        const raw = request.query as { role?: string };
+        const raw = request.query as { role?: string; scope?: string };
         const qb = userRepo.createQueryBuilder("u").orderBy("u.created_at", "DESC");
+
+        if (raw.scope === "staff") {
+          qb.andWhere(
+            `(:psa = ANY(u.roles) OR :sa = ANY(u.roles) OR :vm = ANY(u.roles) OR :fe = ANY(u.roles))`,
+            {
+              psa: UserRole.PARKING_SUPER_ADMIN,
+              sa: UserRole.SUPER_ADMIN,
+              vm: UserRole.VERIFICATION_MANAGER,
+              fe: UserRole.FIELD_EXECUTIVE,
+            },
+          );
+        } else if (raw.scope === "tanker") {
+          return {
+            items: [],
+            page: query.page,
+            limit: query.limit,
+            total: 0,
+            totalPages: 1,
+          };
+        } else if (raw.scope === "parking") {
+          qb.andWhere(
+            `(
+              :owner = ANY(u.roles)
+              OR (
+                :customer = ANY(u.roles)
+                AND NOT (:supplier = ANY(u.roles))
+                AND NOT (:driver = ANY(u.roles))
+                AND NOT (:psa = ANY(u.roles))
+                AND NOT (:sa = ANY(u.roles))
+                AND NOT (:vm = ANY(u.roles))
+                AND NOT (:fe = ANY(u.roles))
+              )
+            )`,
+            {
+              owner: UserRole.PARKING_OWNER,
+              customer: UserRole.CUSTOMER,
+              supplier: UserRole.TANKER_SUPPLIER,
+              driver: UserRole.TANKER_DRIVER,
+              psa: UserRole.PARKING_SUPER_ADMIN,
+              sa: UserRole.SUPER_ADMIN,
+              vm: UserRole.VERIFICATION_MANAGER,
+              fe: UserRole.FIELD_EXECUTIVE,
+            },
+          );
+        }
+
         if (raw.role) qb.andWhere(`:role = ANY(u.roles)`, { role: raw.role });
         if (query.q) {
           qb.andWhere(
@@ -248,8 +385,14 @@ async function main() {
         }
         const total = await qb.getCount();
         const rows = await qb.skip((query.page - 1) * query.limit).take(query.limit).getMany();
+        const managerById = await loadManagersById(
+          userRepo,
+          rows.map((u) => u.reportingManagerId).filter((id): id is number => id != null),
+        );
         return {
-          items: rows.map(serializeUser),
+          items: rows.map((u) =>
+            serializeUser(u, u.reportingManagerId ? managerById.get(u.reportingManagerId) : null),
+          ),
           page: query.page,
           limit: query.limit,
           total,
@@ -258,7 +401,7 @@ async function main() {
       });
 
       app.get("/v1/users/me", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -269,8 +412,64 @@ async function main() {
         return serializeUser(user);
       });
 
+      app.get("/v1/users/me/reportees", async (request, reply) => {
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        if (!userId) {
+          return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+        }
+
+        const me = await userRepo.findOne({ where: { id: userId } });
+        if (!me) {
+          return reply.code(404).send({ error: { code: "NOT_FOUND", message: "User not found" } });
+        }
+
+        const canView =
+          me.roles.includes(UserRole.VERIFICATION_MANAGER) ||
+          me.roles.includes(UserRole.PARKING_SUPER_ADMIN) ||
+          me.roles.includes(UserRole.SUPER_ADMIN);
+        if (!canView) {
+          return reply.code(403).send({
+            error: {
+              code: "FORBIDDEN",
+              message: "Only verification managers can view reportees",
+            },
+          });
+        }
+
+        const query = paginationQuerySchema.parse(request.query);
+        const qb = userRepo
+          .createQueryBuilder("u")
+          .where("u.reporting_manager_id = :managerId", { managerId: userId })
+          .andWhere(`:fe = ANY(u.roles)`, { fe: UserRole.FIELD_EXECUTIVE })
+          .orderBy("u.created_at", "DESC");
+
+        if (query.q) {
+          qb.andWhere(
+            `(u.phone ILIKE :q OR COALESCE(u.name,'') ILIKE :q OR COALESCE(u.email,'') ILIKE :q OR COALESCE(u.city,'') ILIKE :q)`,
+            { q: `%${query.q}%` },
+          );
+        }
+
+        const total = await qb.getCount();
+        const rows = await qb.skip((query.page - 1) * query.limit).take(query.limit).getMany();
+        const managerById = await loadManagersById(
+          userRepo,
+          rows.map((u) => u.reportingManagerId).filter((id): id is number => id != null),
+        );
+
+        return {
+          items: rows.map((u) =>
+            serializeUser(u, u.reportingManagerId ? managerById.get(u.reportingManagerId) : null),
+          ),
+          page: query.page,
+          limit: query.limit,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / query.limit)),
+        };
+      });
+
       app.patch("/v1/users/me", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -290,7 +489,7 @@ async function main() {
       });
 
       app.post("/v1/users/me/customer-profile", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -315,7 +514,7 @@ async function main() {
 
       /** Complete public signup after OTP login (customer or parking owner). */
       app.post("/v1/users/me/signup", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -325,6 +524,15 @@ async function main() {
         }
 
         const body = publicSignupSchema.parse(request.body);
+
+        if (body.intent === "supplier") {
+          return reply.code(400).send({
+            error: {
+              code: "INVALID_INTENT",
+              message: "Supplier signup must use the tanker login flow.",
+            },
+          });
+        }
 
         if (user.name && user.email) {
           return reply.code(409).send({
@@ -363,7 +571,7 @@ async function main() {
       });
 
       app.patch("/v1/users/:id/roles", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const body = z.object({ roles: z.array(userRoleSchema).min(1) }).parse(request.body);
         const user = await userRepo.findOne({ where: { id } });
         if (!user) {
@@ -391,7 +599,7 @@ async function main() {
       }
 
       app.get("/v1/users/me/bank-accounts", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -400,7 +608,7 @@ async function main() {
       });
 
       app.post("/v1/users/me/bank-accounts", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -430,16 +638,19 @@ async function main() {
       });
 
       app.get("/v1/users/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const user = await userRepo.findOne({ where: { id } });
         if (!user) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "User not found" } });
         }
-        return serializeUser(user);
+        const manager = user.reportingManagerId
+          ? await userRepo.findOne({ where: { id: user.reportingManagerId } })
+          : null;
+        return serializeUser(user, manager);
       });
 
       app.patch("/v1/users/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const body = updateUserAdminSchema.parse(request.body);
         const user = await userRepo.findOne({ where: { id } });
         if (!user) {
@@ -468,22 +679,106 @@ async function main() {
         if (body.preferredLocation !== undefined) user.preferredLocation = body.preferredLocation;
         if (body.roles !== undefined) user.roles = body.roles;
 
-        return serializeUser(await userRepo.save(user));
+        const effectiveRoles = body.roles ?? user.roles;
+        const isFieldExecutive = effectiveRoles.includes(UserRole.FIELD_EXECUTIVE);
+
+        if (body.reportingManagerId !== undefined) {
+          if (!isFieldExecutive) {
+            return reply.code(400).send({
+              error: {
+                code: "INVALID_MANAGER",
+                message: "Reporting manager can only be set for field executives",
+              },
+            });
+          }
+          if (body.reportingManagerId != null) {
+            const check = await validateReportingManager(userRepo, body.reportingManagerId);
+            if (!check.ok) {
+              return reply.code(400).send({
+                error: { code: "INVALID_MANAGER", message: check.message },
+              });
+            }
+          }
+          user.reportingManagerId = body.reportingManagerId;
+        } else if (body.roles !== undefined && !isFieldExecutive) {
+          user.reportingManagerId = null;
+        }
+
+        const saved = await userRepo.save(user);
+        const manager = saved.reportingManagerId
+          ? await userRepo.findOne({ where: { id: saved.reportingManagerId } })
+          : null;
+        return serializeUser(saved, manager);
       });
 
       app.patch("/v1/users/:id/status", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const headers = request.headers as Record<string, unknown>;
+        const actorRoles = getRolesFromHeaders(headers);
+        const isParkingAdmin =
+          actorRoles.includes(UserRole.PARKING_SUPER_ADMIN) ||
+          actorRoles.includes(UserRole.SUPER_ADMIN);
+        if (!isParkingAdmin) {
+          return reply.code(403).send({
+            error: {
+              code: "FORBIDDEN",
+              message: "Only Parking Super Admin can activate or deactivate accounts",
+            },
+          });
+        }
+
+        const id = parseEntityId((request.params as { id: string }).id);
         const body = updateUserStatusSchema.parse(request.body);
         const user = await userRepo.findOne({ where: { id } });
         if (!user) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "User not found" } });
         }
+
+        const wasActive = user.isActive;
+        const previousReason = user.deactivationReason;
         user.isActive = body.isActive;
-        return serializeUser(await userRepo.save(user));
+        if (body.isActive) {
+          user.deactivationReason = null;
+          user.deactivatedAt = null;
+          user.deactivatedBy = null;
+        } else {
+          const actorId = parseUserIdFromHeaders(headers);
+          user.deactivationReason =
+            user.deactivationReason ?? "Deactivated by Parking Super Admin";
+          user.deactivatedAt = new Date();
+          user.deactivatedBy = actorId != null ? `admin:${actorId}` : "admin";
+        }
+
+        const saved = await userRepo.save(user);
+
+        // Notify when Parking Super Admin reactivates an inactive account
+        if (body.isActive && !wasActive) {
+          void notifyUser({
+            userId: saved.id,
+            toEmail: saved.email,
+            toPhone: saved.phone,
+            title: "Account reactivated",
+            body: [
+              `Hello ${saved.name ?? "User"},`,
+              "",
+              "Your Paashupatastra parking account has been reactivated by Parking Super Admin.",
+              ...(previousReason
+                ? ["", `Previous deactivation reason: ${previousReason}`]
+                : []),
+              "",
+              "You can log in again and use the application normally.",
+              "",
+              "— Paashupatastra",
+            ].join("\n"),
+            referenceType: "user_status",
+            referenceId: saved.id,
+          });
+        }
+
+        return serializeUser(saved);
       });
 
       app.delete("/v1/users/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const user = await userRepo.findOne({ where: { id } });
         if (!user) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "User not found" } });
@@ -503,7 +798,7 @@ async function main() {
       });
 
       app.post("/v1/users/documents", async (request, reply) => {
-        const userId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -521,13 +816,13 @@ async function main() {
       });
 
       app.get("/v1/users/:id/documents", async (request) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const items = await docRepo.find({ where: { userId: id }, order: { createdAt: "DESC" } });
         return { items };
       });
 
       app.get("/v1/users/:id/bank-accounts", async (request) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const items = await bankRepo.find({ where: { userId: id }, order: { createdAt: "DESC" } });
         return { items };
       });
@@ -535,7 +830,7 @@ async function main() {
       app.post("/v1/users/staff", async (request, reply) => {
         const body = createStaffInviteSchema.parse(request.body);
         const appUrl = (process.env.APP_PUBLIC_URL ?? "http://localhost:5173").replace(/\/$/, "");
-        const loginPath = `${appUrl}/staff/login`;
+        const loginPath = `${appUrl}/staff/login/parking`;
 
         const conflict = await findConflict(userRepo, {
           phone: body.phone,
@@ -545,6 +840,18 @@ async function main() {
           return reply.code(409).send({
             error: { code: "DUPLICATE_USER", message: conflict.message, field: conflict.field },
           });
+        }
+
+        let reportingManagerId: number | null = null;
+        if (body.role === UserRole.FIELD_EXECUTIVE) {
+          const managerId = body.reportingManagerId!;
+          const check = await validateReportingManager(userRepo, managerId);
+          if (!check.ok) {
+            return reply.code(400).send({
+              error: { code: "INVALID_MANAGER", message: check.message },
+            });
+          }
+          reportingManagerId = managerId;
         }
 
         let user = await userRepo.save(
@@ -559,6 +866,7 @@ async function main() {
             dateOfBirth: body.dateOfBirth ?? null,
             preferredLocation: body.preferredLocation ?? null,
             roles: [body.role],
+            reportingManagerId,
             isActive: true,
           }),
         );
@@ -572,8 +880,42 @@ async function main() {
           app.log.error({ err }, "Staff invite email failed");
         }
 
+        if (body.role === UserRole.FIELD_EXECUTIVE && reportingManagerId) {
+          const manager = await userRepo.findOne({ where: { id: reportingManagerId } });
+          if (manager) {
+            const managerBody = [
+              `Hello ${manager.name ?? "there"},`,
+              "",
+              "A new field executive has been assigned to report to you.",
+              "",
+              `Name: ${user.name ?? "—"}`,
+              `Mobile: ${user.phone}`,
+              `Email: ${user.email ?? "—"}`,
+              `City: ${user.city ?? "—"}`,
+              "",
+              "They can sign in at the staff login page:",
+              loginPath,
+              "",
+              "— Paashupatastra Admin",
+            ].join("\n");
+            void notifyUser({
+              userId: manager.id,
+              toEmail: manager.email,
+              toPhone: manager.phone,
+              title: "New field executive assigned to you",
+              body: managerBody,
+              referenceType: "staff_invite",
+              referenceId: user.id,
+            });
+          }
+        }
+
+        const manager = user.reportingManagerId
+          ? await userRepo.findOne({ where: { id: user.reportingManagerId } })
+          : null;
+
         return reply.code(201).send({
-          ...serializeUser(user),
+          ...serializeUser(user, manager),
           invite: {
             loginPath,
             phone: user.phone,

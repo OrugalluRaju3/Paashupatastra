@@ -13,21 +13,26 @@ export function cashfreeConfig() {
   return { env, appId, secretKey, apiVersion, baseUrl, configured: Boolean(appId && secretKey) };
 }
 
-export function toCashfreeOrderId(bookingId: string) {
-  // Cashfree order_id: alphanumeric, max ~50. Strip hyphens from UUID.
-  return `bk${bookingId.replace(/-/g, "")}`;
+export function toCashfreeOrderId(bookingId: string | number) {
+  return `bk${bookingId}`;
 }
 
-export function bookingIdFromCashfreeOrderId(orderId: string): string | null {
-  const raw = orderId.startsWith("bk") ? orderId.slice(2) : orderId;
-  if (!/^[a-f0-9]{32}$/i.test(raw)) return null;
-  return [
-    raw.slice(0, 8),
-    raw.slice(8, 12),
-    raw.slice(12, 16),
-    raw.slice(16, 20),
-    raw.slice(20),
-  ].join("-");
+export function toCashfreeTankerOrderId(tankerOrderId: string | number) {
+  return `tk${tankerOrderId}`;
+}
+
+export function bookingIdFromCashfreeOrderId(orderId: string): number | null {
+  if (!orderId.startsWith("bk")) return null;
+  const n = Number.parseInt(orderId.slice(2), 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+export function tankerOrderIdFromCashfreeOrderId(orderId: string): number | null {
+  if (!orderId.startsWith("tk")) return null;
+  const n = Number.parseInt(orderId.slice(2), 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
 }
 
 type CashfreeOrder = {
@@ -77,6 +82,7 @@ export async function createCashfreeOrder(input: {
   customerName?: string | null;
   returnUrl: string;
   notifyUrl?: string;
+  orderNote?: string;
 }) {
   return cashfreeFetch<CashfreeOrder>("/orders", {
     method: "POST",
@@ -85,7 +91,7 @@ export async function createCashfreeOrder(input: {
       order_amount: Number(input.amountInr.toFixed(2)),
       order_currency: "INR",
       customer_details: {
-        customer_id: input.customerId.replace(/-/g, "").slice(0, 50),
+        customer_id: String(input.customerId).replace(/-/g, "").slice(0, 50),
         customer_phone: input.customerPhone,
         customer_email: input.customerEmail || undefined,
         customer_name: input.customerName || undefined,
@@ -94,7 +100,7 @@ export async function createCashfreeOrder(input: {
         return_url: input.returnUrl,
         notify_url: input.notifyUrl,
       },
-      order_note: "Paashupatastra parking booking",
+      order_note: input.orderNote ?? "Paashupatastra payment",
     }),
   });
 }

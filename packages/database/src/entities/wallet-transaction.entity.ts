@@ -8,12 +8,12 @@ import {
 
 @Entity({ name: "wallet_transactions" })
 export class WalletTransactionEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "wallet_id", type: "uuid" })
-  walletId!: string;
+  @Column({ name: "wallet_id", type: "int" })
+  walletId!: number;
 
   @Column({ type: "varchar", length: 16 })
   type!: string; // credit | debit
@@ -27,8 +27,8 @@ export class WalletTransactionEntity {
   @Column({ type: "varchar", length: 64 })
   purpose!: string; // booking_payment | commission | settlement | payout | refund
 
-  @Column({ name: "reference_id", type: "uuid", nullable: true })
-  referenceId!: string | null;
+  @Column({ name: "reference_id", type: "int", nullable: true })
+  referenceId!: number | null;
 
   @Column({ type: "text", nullable: true })
   notes!: string | null;

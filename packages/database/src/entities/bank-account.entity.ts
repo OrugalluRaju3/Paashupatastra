@@ -9,12 +9,12 @@ import {
 
 @Entity({ name: "bank_accounts" })
 export class BankAccountEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "user_id", type: "uuid" })
-  userId!: string;
+  @Column({ name: "user_id", type: "int" })
+  userId!: number;
 
   @Column({ name: "account_holder_name", type: "varchar", length: 120 })
   accountHolderName!: string;

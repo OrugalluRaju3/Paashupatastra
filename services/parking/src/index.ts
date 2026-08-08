@@ -1,5 +1,4 @@
 import "reflect-metadata";
-import { randomUUID } from "node:crypto";
 import {
   BankAccountEntity,
   CommissionConfigEntity,
@@ -15,13 +14,7 @@ import {
   toIso,
   toIsoRequired,
 } from "@paashupatastra/database";
-import {
-  createService,
-  envInt,
-  getRolesFromHeaders,
-  getUserIdFromHeaders,
-  loadEnv,
-} from "@paashupatastra/service-kit";
+import { createService, envInt, getRolesFromHeaders, getUserIdFromHeaders, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import {
   BookingStatus,
   DocumentType,
@@ -44,9 +37,12 @@ import {
 import { In } from "typeorm";
 import { z } from "zod";
 import { calcParkingQuote } from "./pricing";
+import { checkListingAvailability, listingFitsAvailability } from "./availability";
 
 function requireUserId(headers: Record<string, unknown>) {
-  return getUserIdFromHeaders(headers) ?? randomUUID();
+  const id = parseUserIdFromHeaders(headers);
+  if (id == null) throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  return id;
 }
 
 function normalizeName(value: string) {
@@ -56,8 +52,81 @@ function normalizeName(value: string) {
 function canManageVerification(headers: Record<string, unknown>) {
   const roles = getRolesFromHeaders(headers);
   return (
-    roles.includes(UserRole.SUPER_ADMIN) || roles.includes(UserRole.VERIFICATION_MANAGER)
+    roles.includes(UserRole.SUPER_ADMIN) ||
+    roles.includes(UserRole.PARKING_SUPER_ADMIN) ||
+    roles.includes(UserRole.VERIFICATION_MANAGER)
   );
+}
+
+function isFieldExecutiveOnly(headers: Record<string, unknown>) {
+  const roles = getRolesFromHeaders(headers);
+  const currentUserId = parseUserIdFromHeaders(headers);
+  return (
+    Boolean(currentUserId) &&
+    roles.includes(UserRole.FIELD_EXECUTIVE) &&
+    !canManageVerification(headers)
+  );
+}
+
+/** Field executives only see listings they were assigned to or personally rejected. */
+function executiveListingScopeSql(alias = "l") {
+  return `(
+    EXISTS (
+      SELECT 1 FROM verification_assignments va
+      WHERE va.listing_id = ${alias}.id AND va.executive_user_id = :execId
+    )
+    OR ${alias}.rejected_by_user_id = :execId
+  )`;
+}
+
+function rejectorRoleLabel(roles: string[]) {
+  if (roles.includes(UserRole.PARKING_SUPER_ADMIN) || roles.includes(UserRole.SUPER_ADMIN)) {
+    return "parking_super_admin";
+  }
+  if (roles.includes(UserRole.VERIFICATION_MANAGER)) {
+    return "verification_manager";
+  }
+  if (roles.includes(UserRole.FIELD_EXECUTIVE)) {
+    return "field_executive";
+  }
+  return roles[0] ?? "staff";
+}
+
+function applyListingRejection(
+  listing: ParkingListingEntity,
+  opts: { reason: string; rejectedByUserId: number; rejectedByRole: string },
+) {
+  listing.status = ListingStatus.REJECTED;
+  listing.isActive = false;
+  listing.rejectionReason = opts.reason;
+  listing.needsInfoNotes = null;
+  listing.rejectedByUserId = opts.rejectedByUserId;
+  listing.rejectedByRole = opts.rejectedByRole;
+  listing.rejectedAt = new Date();
+}
+
+function clearListingRejection(listing: ParkingListingEntity) {
+  listing.rejectionReason = null;
+  listing.rejectedByUserId = null;
+  listing.rejectedByRole = null;
+  listing.rejectedAt = null;
+}
+
+function formatRejectionNotice(input: {
+  reason: string;
+  rejectedAt: Date | null | undefined;
+  rejectedByLabel?: string | null;
+}) {
+  const when = input.rejectedAt
+    ? toIsoRequired(input.rejectedAt)
+    : toIsoRequired(new Date());
+  return [
+    `Rejection reason: ${input.reason.trim()}`,
+    `Rejected at: ${when}`,
+    input.rejectedByLabel ? `Rejected by: ${input.rejectedByLabel}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function serializeListing(row: ParkingListingEntity) {
@@ -89,6 +158,9 @@ function serializeListing(row: ParkingListingEntity) {
     priceInPaise: row.priceInPaise,
     isActive: row.isActive,
     rejectionReason: row.rejectionReason,
+    rejectedByUserId: row.rejectedByUserId,
+    rejectedByRole: row.rejectedByRole,
+    rejectedAt: toIso(row.rejectedAt),
     needsInfoNotes: row.needsInfoNotes,
     activatedAt: toIso(row.activatedAt),
     createdAt: toIsoRequired(row.createdAt),
@@ -187,6 +259,9 @@ function navigationUrl(listing: {
 function listingSummary(listing: {
   apartmentName: string;
   parkingSlotNumber: string;
+  flatNumber?: string | null;
+  blockTower?: string | null;
+  floorNumber?: string | null;
   addressLine?: string | null;
   city?: string | null;
   state?: string | null;
@@ -194,11 +269,13 @@ function listingSummary(listing: {
   parkingType?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  mapsUrl?: string | null;
 } | null) {
   if (!listing) {
     return {
       slotLabel: "your parking slot",
       addressBlock: "—",
+      locationExtra: null as string | null,
       navUrl: null as string | null,
     };
   }
@@ -210,9 +287,17 @@ function listingSummary(listing: {
   ]
     .filter(Boolean)
     .join(", ");
+  const locationExtra = [
+    listing.blockTower ? `Block ${listing.blockTower}` : null,
+    listing.flatNumber ? `Flat ${listing.flatNumber}` : null,
+    listing.floorNumber ? `Floor ${listing.floorNumber}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return {
     slotLabel: `${listing.apartmentName}, Slot ${listing.parkingSlotNumber}${listing.parkingType ? ` (${listing.parkingType})` : ""}`,
     addressBlock: addressBlock || "—",
+    locationExtra: locationExtra || null,
     navUrl: navigationUrl(listing),
   };
 }
@@ -220,11 +305,11 @@ function listingSummary(listing: {
 async function notify(
   ds: Awaited<ReturnType<typeof getDataSource>>,
   input: {
-    userId?: string | null;
+    userId?: number | null;
     title: string;
     body: string;
     referenceType?: string;
-    referenceId?: string;
+    referenceId?: number;
     channel?: string;
     toEmail?: string | null;
     toPhone?: string | null;
@@ -272,7 +357,161 @@ async function notify(
   }
 }
 
-async function collectPayment(bookingId: string, orderId?: string) {
+async function hasBookingNotify(
+  ds: Awaited<ReturnType<typeof getDataSource>>,
+  opts: { userId: number; referenceId: number; titlePrefix: string },
+) {
+  const repo = ds.getRepository(NotificationLogEntity);
+  const row = await repo
+    .createQueryBuilder("n")
+    .where("n.user_id = :userId", { userId: opts.userId })
+    .andWhere("n.reference_type = :refType", { refType: "parking_booking" })
+    .andWhere("n.reference_id = :refId", { refId: opts.referenceId })
+    .andWhere("n.title ILIKE :title", { title: `${opts.titlePrefix}%` })
+    .getOne();
+  return Boolean(row);
+}
+
+async function notifyBookingConfirmed(
+  ds: Awaited<ReturnType<typeof getDataSource>>,
+  deps: {
+    booking: ParkingBookingEntity;
+    listing: ParkingListingEntity | null;
+    customer: UserEntity | null;
+    owner: UserEntity | null;
+  },
+) {
+  const { booking, listing, customer, owner } = deps;
+  const { slotLabel, addressBlock, locationExtra, navUrl } = listingSummary(listing);
+  const startLabel = new Date(booking.startAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const endLabel = new Date(booking.endAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const amountLabel = formatInr(booking.totalAmountInPaise || booking.amountInPaise);
+  const durationLabel =
+    booking.durationMinutes != null && booking.durationMinutes > 0
+      ? `${booking.durationMinutes} minutes`
+      : null;
+  const vehicleLabel = [
+    booking.vehicleType ? booking.vehicleType.replaceAll("_", " ") : null,
+    booking.vehicleNumber,
+  ]
+    .filter(Boolean)
+    .join(" · ") || "—";
+  const coords =
+    listing?.latitude != null && listing?.longitude != null
+      ? `${listing.latitude}, ${listing.longitude}`
+      : null;
+
+  if (customer) {
+    const already = await hasBookingNotify(ds, {
+      userId: customer.id,
+      referenceId: booking.id,
+      titlePrefix: "Booking confirmed",
+    });
+    if (!already) {
+      const customerBody = [
+        `Hello ${customer.name ?? "Customer"},`,
+        "",
+        "Your parking booking is confirmed. Payment received successfully.",
+        "",
+        "Booking details",
+        `• Booking ID: ${booking.id}`,
+        `• Parking: ${slotLabel}`,
+        locationExtra ? `• Location: ${locationExtra}` : null,
+        `• Address: ${addressBlock}`,
+        coords ? `• Coordinates: ${coords}` : null,
+        `• Check-in: ${startLabel}`,
+        `• Check-out: ${endLabel}`,
+        durationLabel ? `• Duration: ${durationLabel}` : null,
+        `• Amount paid: ${amountLabel}`,
+        `• Vehicle: ${vehicleLabel}`,
+        navUrl ? `• Navigate: ${navUrl}` : null,
+        "",
+        "Next steps",
+        "1. Open My bookings for live map navigation to the slot.",
+        "2. On arrival, ask the owner for the check-in OTP.",
+        "3. Enter the OTP to start your parking session.",
+        "4. You will get a reminder before check-out.",
+        "",
+        "— Paashupatastra",
+      ]
+        .filter((line) => line !== null)
+        .join("\n");
+      await notify(ds, {
+        userId: customer.id,
+        toEmail: customer.email,
+        toPhone: customer.phone,
+        title: "Booking confirmed — navigate to your parking slot",
+        body: customerBody,
+        referenceType: "parking_booking",
+        referenceId: booking.id,
+      });
+    }
+  }
+
+  if (owner && booking.ownerUserId) {
+    const already = await hasBookingNotify(ds, {
+      userId: owner.id,
+      referenceId: booking.id,
+      titlePrefix: "New paid booking",
+    });
+    if (!already) {
+      const customerName = customer?.name ?? "Customer";
+      const customerPhone = customer?.phone ?? "—";
+      const ownerShareHint = formatInr(
+        Math.max(
+          0,
+          (booking.totalAmountInPaise || booking.amountInPaise) -
+            (booking.platformFeeInPaise || 0) -
+            (booking.taxInPaise || 0),
+        ),
+      );
+      const ownerBody = [
+        `Hello ${owner.name ?? "Owner"},`,
+        "",
+        "A customer has paid and confirmed a booking for your parking slot.",
+        "",
+        "Slot details",
+        `• Parking: ${slotLabel}`,
+        locationExtra ? `• Location: ${locationExtra}` : null,
+        `• Address: ${addressBlock}`,
+        `• Check-in: ${startLabel}`,
+        `• Check-out: ${endLabel}`,
+        durationLabel ? `• Duration: ${durationLabel}` : null,
+        "",
+        "Customer",
+        `• Name: ${customerName}`,
+        `• Mobile: ${customerPhone}`,
+        `• Vehicle: ${vehicleLabel}`,
+        `• Booking ID: ${booking.id}`,
+        "",
+        "Check-in OTP",
+        `• Share this OTP only when the customer arrives: ${booking.ownerOtp}`,
+        "",
+        "Payment",
+        `• Gross paid: ${amountLabel} (held in platform wallet)`,
+        `• Platform fee: ${formatInr(booking.platformFeeInPaise || 0)}`,
+        `• Estimated credit after check-out: ${ownerShareHint}`,
+        "",
+        "After the customer checks out, settlement will credit your owner wallet.",
+        "",
+        "— Paashupatastra",
+      ]
+        .filter((line) => line !== null)
+        .join("\n");
+      await notify(ds, {
+        userId: owner.id,
+        toEmail: owner.email,
+        toPhone: owner.phone,
+        title: `New paid booking — OTP ${booking.ownerOtp}`,
+        body: ownerBody,
+        referenceType: "parking_booking",
+        referenceId: booking.id,
+      });
+    }
+  }
+}
+
+async function collectPayment(bookingId: number, orderId?: string) {
   const res = await fetch(`${paymentsBaseUrl()}/v1/payments/bookings/${bookingId}/collect`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -290,7 +529,7 @@ async function collectPayment(bookingId: string, orderId?: string) {
   return data;
 }
 
-async function settlePayment(bookingId: string) {
+async function settlePayment(bookingId: number) {
   const res = await fetch(`${paymentsBaseUrl()}/v1/payments/bookings/${bookingId}/settle`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -329,30 +568,56 @@ async function main() {
     port: envInt("PARKING_PORT", 3004),
     registerRoutes: async (app) => {
       // -------- Stats --------
-      app.get("/v1/parking/stats", async () => {
+      app.get("/v1/parking/stats", async (request) => {
+        const headers = request.headers as Record<string, unknown>;
+        const execOnly = isFieldExecutiveOnly(headers);
+        const execId = parseUserIdFromHeaders(headers);
+
+        const countByStatus = async (status: ListingStatus) => {
+          const qb = listingRepo.createQueryBuilder("l").where("l.status = :status", { status });
+          if (execOnly && execId != null) {
+            qb.andWhere(executiveListingScopeSql("l"), { execId });
+          }
+          return qb.getCount();
+        };
+
+        const countAllListings = async () => {
+          const qb = listingRepo.createQueryBuilder("l");
+          if (execOnly && execId != null) {
+            qb.where(executiveListingScopeSql("l"), { execId });
+          }
+          return qb.getCount();
+        };
+
         const [
           listingsTotal,
           pendingVerification,
           fieldInProgress,
           managerReview,
+          needsInfo,
+          rejected,
           approved,
           bookingsTotal,
           bookingsActive,
+          bookingsCompleted,
           slotsTotal,
           slotsPending,
           slotsApproved,
         ] = await Promise.all([
-          listingRepo.count(),
-          listingRepo.count({ where: { status: ListingStatus.PENDING_VERIFICATION } }),
-          listingRepo.count({ where: { status: ListingStatus.FIELD_IN_PROGRESS } }),
-          listingRepo.count({ where: { status: ListingStatus.MANAGER_REVIEW } }),
-          listingRepo.count({ where: { status: ListingStatus.APPROVED } }),
+          countAllListings(),
+          countByStatus(ListingStatus.PENDING_VERIFICATION),
+          countByStatus(ListingStatus.FIELD_IN_PROGRESS),
+          countByStatus(ListingStatus.MANAGER_REVIEW),
+          countByStatus(ListingStatus.NEEDS_INFO),
+          countByStatus(ListingStatus.REJECTED),
+          countByStatus(ListingStatus.APPROVED),
           bookingRepo.count(),
           bookingRepo.count({
             where: {
               status: In([BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN]),
             },
           }),
+          bookingRepo.count({ where: { status: BookingStatus.COMPLETED } }),
           slotRepo.count(),
           slotRepo.count({ where: { status: In([ListingStatus.PENDING_APPROVAL, ListingStatus.PENDING_VERIFICATION]) } }),
           slotRepo.count({ where: { status: ListingStatus.APPROVED } }),
@@ -363,9 +628,12 @@ async function main() {
           pendingVerification,
           fieldInProgress,
           managerReview,
+          needsInfo,
+          rejected,
           approved,
           bookingsTotal,
           bookingsActive,
+          bookingsCompleted,
           slotsTotal,
           slotsPending,
           slotsApproved,
@@ -489,7 +757,7 @@ async function main() {
       // -------- Owner application (full V1 workflow) --------
       app.post("/v1/parking/owner-applications", async (request, reply) => {
         const body = ownerApplicationSchema.parse(request.body);
-        const ownerUserId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const ownerUserId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!ownerUserId) {
           return reply.code(401).send({
             error: { code: "UNAUTHORIZED", message: "Login required before owner registration" },
@@ -644,9 +912,19 @@ async function main() {
       app.get("/v1/parking/listings", async (request) => {
         const query = paginationQuerySchema.parse(request.query);
         const raw = request.query as { status?: string; ownerUserId?: string };
+        const headers = request.headers as Record<string, unknown>;
+        const currentUserId = parseUserIdFromHeaders(headers);
+        const execOnly = isFieldExecutiveOnly(headers);
+
         const qb = listingRepo.createQueryBuilder("l").orderBy("l.created_at", "DESC");
         if (raw.status) qb.andWhere("l.status = :status", { status: raw.status });
-        if (raw.ownerUserId) qb.andWhere("l.owner_user_id = :ownerUserId", { ownerUserId: raw.ownerUserId });
+        if (raw.ownerUserId) qb.andWhere("l.owner_user_id = :ownerUserId", { ownerUserId: parseEntityId(raw.ownerUserId) });
+
+        // Field executives only see listings tied to their assignments (or rejected by them)
+        if (execOnly && currentUserId != null) {
+          qb.andWhere(executiveListingScopeSql("l"), { execId: currentUserId });
+        }
+
         if (query.q) {
           qb.andWhere(
             `(l.apartment_name ILIKE :q OR l.city ILIKE :q OR l.pin_code ILIKE :q OR l.parking_slot_number ILIKE :q OR l.address_line ILIKE :q OR CAST(l.owner_user_id AS text) ILIKE :q)`,
@@ -656,19 +934,31 @@ async function main() {
         const total = await qb.getCount();
         const rows = await qb.skip((query.page - 1) * query.limit).take(query.limit).getMany();
         const ownerIds = [...new Set(rows.map((r) => r.ownerUserId))];
-        const owners =
-          ownerIds.length > 0
-            ? await userRepo.find({ where: { id: In(ownerIds) } })
+        const rejectorIds = [
+          ...new Set(
+            rows
+              .map((r) => r.rejectedByUserId)
+              .filter((id): id is number => id != null && id > 0),
+          ),
+        ];
+        const relatedIds = [...new Set([...ownerIds, ...rejectorIds])];
+        const relatedUsers =
+          relatedIds.length > 0
+            ? await userRepo.find({ where: { id: In(relatedIds) } })
             : [];
-        const ownerById = new Map(owners.map((u) => [u.id, u]));
+        const userById = new Map(relatedUsers.map((u) => [u.id, u]));
         return {
           items: rows.map((row) => {
-            const owner = ownerById.get(row.ownerUserId);
+            const owner = userById.get(row.ownerUserId);
+            const rejector =
+              row.rejectedByUserId != null ? userById.get(row.rejectedByUserId) : null;
             return {
               ...serializeListing(row),
               ownerName: owner?.name ?? null,
               ownerPhone: owner?.phone ?? null,
               ownerEmail: owner?.email ?? null,
+              rejectedByName: rejector?.name ?? null,
+              rejectedByPhone: rejector?.phone ?? null,
             };
           }),
           page: query.page,
@@ -679,12 +969,36 @@ async function main() {
       });
 
       app.get("/v1/parking/listings/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
+        const headers = request.headers as Record<string, unknown>;
         const row = await listingRepo.findOne({ where: { id } });
         if (!row) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Listing not found" } });
         }
+
+        if (isFieldExecutiveOnly(headers)) {
+          const execId = parseUserIdFromHeaders(headers);
+          const mine =
+            execId != null &&
+            (row.rejectedByUserId === execId ||
+              (await assignmentRepo.exist({
+                where: { listingId: id, executiveUserId: execId },
+              })));
+          if (!mine) {
+            return reply.code(403).send({
+              error: {
+                code: "FORBIDDEN",
+                message: "You can only view listings assigned to you",
+              },
+            });
+          }
+        }
+
         const owner = await userRepo.findOne({ where: { id: row.ownerUserId } });
+        const rejector =
+          row.rejectedByUserId != null
+            ? await userRepo.findOne({ where: { id: row.rejectedByUserId } })
+            : null;
         const docs = await docRepo.find({ where: { listingId: id } });
         const assignments = await assignmentRepo.find({
           where: { listingId: id },
@@ -700,6 +1014,8 @@ async function main() {
             ownerName: owner?.name ?? null,
             ownerPhone: owner?.phone ?? null,
             ownerEmail: owner?.email ?? null,
+            rejectedByName: rejector?.name ?? null,
+            rejectedByPhone: rejector?.phone ?? null,
           },
           documents: docs,
           assignments,
@@ -742,13 +1058,129 @@ async function main() {
         listing.status = ListingStatus.FIELD_IN_PROGRESS;
         await listingRepo.save(listing);
 
-        await notify(ds, {
-          userId: body.executiveUserId,
-          title: "New field verification assigned",
-          body: `Verify parking at ${listing.apartmentName}, ${listing.city}. Due within 24 hours.`,
-          referenceType: "verification_assignment",
-          referenceId: assignment.id,
-        });
+        const [executive, owner, assignedByUser] = await Promise.all([
+          userRepo.findOne({ where: { id: body.executiveUserId } }),
+          userRepo.findOne({ where: { id: listing.ownerUserId } }),
+          userRepo.findOne({ where: { id: assignedBy } }),
+        ]);
+
+        let managerUser: UserEntity | null = null;
+        if (executive?.reportingManagerId) {
+          managerUser = await userRepo.findOne({ where: { id: executive.reportingManagerId } });
+        }
+        if (!managerUser) {
+          managerUser = assignedByUser;
+        }
+
+        const { slotLabel, addressBlock } = listingSummary(listing);
+        const dueLabel = toIsoRequired(dueAt);
+        const cityPin = [listing.city, listing.pinCode ? `PIN ${listing.pinCode}` : null]
+          .filter(Boolean)
+          .join(", ");
+
+        const executiveContact = [
+          executive?.name ? `Name: ${executive.name}` : null,
+          executive?.phone ? `Phone: ${executive.phone}` : null,
+          executive?.email ? `Email: ${executive.email}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const ownerContact = [
+          owner?.name ? `Name: ${owner.name}` : null,
+          owner?.phone ? `Phone: ${owner.phone}` : null,
+          owner?.email ? `Email: ${owner.email}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const assignedByLabel = assignedByUser?.name ?? `User #${assignedBy}`;
+
+        const ownerBody = [
+          "A field verification visit has been scheduled for your parking request.",
+          "",
+          `Apartment: ${listing.apartmentName}`,
+          `Slot: ${slotLabel}`,
+          `Location: ${cityPin || listing.city}`,
+          `Address: ${addressBlock}`,
+          `Status: ${ListingStatus.FIELD_IN_PROGRESS}`,
+          "",
+          "Assigned field executive:",
+          executiveContact || "—",
+          "",
+          `Due by: ${dueLabel}`,
+          "",
+          "A field executive will visit to verify your parking slot.",
+        ].join("\n");
+
+        const executiveBody = [
+          "You have been assigned a field verification.",
+          "",
+          `Apartment: ${listing.apartmentName}`,
+          `Slot: ${listing.parkingSlotNumber}${listing.parkingType ? ` (${listing.parkingType})` : ""}`,
+          `Address: ${addressBlock}`,
+          `City: ${listing.city ?? "—"}`,
+          "",
+          ownerContact ? `Owner contact:\n${ownerContact}` : null,
+          "",
+          `Due by: ${dueLabel}`,
+          `Assigned by: ${assignedByLabel}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const managerBody = [
+          "Your field executive has been assigned to verify a request.",
+          "",
+          `Apartment: ${listing.apartmentName}`,
+          `Slot: ${listing.parkingSlotNumber}`,
+          `City: ${listing.city ?? "—"}`,
+          "",
+          "Field executive:",
+          executiveContact || "—",
+          "",
+          ownerContact ? `Owner contact:\n${ownerContact}` : null,
+          "",
+          `Due by: ${dueLabel}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        await Promise.allSettled([
+          owner
+            ? notify(ds, {
+                userId: owner.id,
+                toEmail: owner.email,
+                toPhone: owner.phone,
+                title: "Field verification scheduled",
+                body: ownerBody,
+                referenceType: "verification_assignment",
+                referenceId: assignment.id,
+              })
+            : Promise.resolve(),
+          executive
+            ? notify(ds, {
+                userId: executive.id,
+                toEmail: executive.email,
+                toPhone: executive.phone,
+                title: "New field verification assigned",
+                body: executiveBody,
+                referenceType: "verification_assignment",
+                referenceId: assignment.id,
+              })
+            : Promise.resolve(),
+          managerUser
+            ? notify(ds, {
+                userId: managerUser.id,
+                toEmail: managerUser.email,
+                toPhone: managerUser.phone,
+                title: "Field executive assigned to request",
+                body: managerBody,
+                referenceType: "verification_assignment",
+                referenceId: assignment.id,
+              })
+            : Promise.resolve(),
+        ]);
 
         return reply.code(201).send(assignment);
       });
@@ -756,12 +1188,23 @@ async function main() {
       app.get("/v1/parking/verification/assignments", async (request) => {
         const query = paginationQuerySchema.parse(request.query);
         const raw = request.query as { executiveUserId?: string; status?: string };
+        const headers = request.headers as Record<string, unknown>;
+        const currentUserId = parseUserIdFromHeaders(headers);
+        const execOnly = isFieldExecutiveOnly(headers);
+
         const qb = assignmentRepo.createQueryBuilder("a").orderBy("a.created_at", "DESC");
-        if (raw.executiveUserId) {
+
+        // Field executives only see their own assignments
+        if (execOnly && currentUserId != null) {
           qb.andWhere("a.executive_user_id = :executiveUserId", {
-            executiveUserId: raw.executiveUserId,
+            executiveUserId: currentUserId,
+          });
+        } else if (raw.executiveUserId) {
+          qb.andWhere("a.executive_user_id = :executiveUserId", {
+            executiveUserId: parseEntityId(raw.executiveUserId),
           });
         }
+
         if (raw.status) qb.andWhere("a.status = :status", { status: raw.status });
         if (query.q) {
           qb.andWhere(
@@ -804,10 +1247,32 @@ async function main() {
 
       app.post("/v1/parking/verification/field-report", async (request, reply) => {
         const body = fieldVerificationReportSchema.parse(request.body);
+
         const executiveUserId = requireUserId(request.headers as Record<string, unknown>);
         const assignment = await assignmentRepo.findOne({ where: { id: body.assignmentId } });
         if (!assignment) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Assignment not found" } });
+        }
+
+        if (
+          assignment.executiveUserId !== executiveUserId &&
+          !canManageVerification(request.headers as Record<string, unknown>)
+        ) {
+          return reply.code(403).send({
+            error: {
+              code: "FORBIDDEN",
+              message: "Only the assigned field executive can submit this report",
+            },
+          });
+        }
+
+        if (["completed", "rejected", "needs_info"].includes(assignment.status)) {
+          return reply.code(400).send({
+            error: {
+              code: "ALREADY_REPORTED",
+              message: `This assignment is already ${assignment.status.replaceAll("_", " ")}`,
+            },
+          });
         }
 
         const listing = await listingRepo.findOne({ where: { id: assignment.listingId } });
@@ -833,31 +1298,146 @@ async function main() {
           }),
         );
 
-        assignment.status = "completed";
-        assignment.completedAt = new Date();
-        await assignmentRepo.save(assignment);
-
         if (body.decision === "reject") {
-          listing.status = ListingStatus.REJECTED;
-          listing.rejectionReason = body.comments;
-          listing.isActive = false;
-        } else if (body.decision === "need_info") {
-          listing.status = ListingStatus.NEEDS_INFO;
-          listing.needsInfoNotes = body.comments;
+          applyListingRejection(listing, {
+            reason: body.comments,
+            rejectedByUserId: executiveUserId,
+            rejectedByRole: UserRole.FIELD_EXECUTIVE,
+          });
+          assignment.status = "rejected";
+          assignment.completedAt = new Date();
         } else {
+          // approve → send to manager review (need_info is manager/admin only)
+          assignment.status = "completed";
+          assignment.completedAt = new Date();
           listing.status = ListingStatus.MANAGER_REVIEW;
+          listing.needsInfoNotes = null;
+          clearListingRejection(listing);
         }
+        await assignmentRepo.save(assignment);
         await listingRepo.save(listing);
 
-        await notify(ds, {
-          userId: listing.ownerUserId,
-          title: "Field verification update",
-          body: `Your listing moved to ${listing.status}.`,
-          referenceType: "parking_listing",
-          referenceId: listing.id,
-        });
+        const [executive, owner, assignedByUser] = await Promise.all([
+          userRepo.findOne({ where: { id: assignment.executiveUserId } }),
+          userRepo.findOne({ where: { id: listing.ownerUserId } }),
+          userRepo.findOne({ where: { id: assignment.assignedByUserId } }),
+        ]);
 
-        return reply.code(201).send({ report, listing: serializeListing(listing) });
+        let reportingManager: UserEntity | null = null;
+        if (executive?.reportingManagerId) {
+          reportingManager = await userRepo.findOne({ where: { id: executive.reportingManagerId } });
+        }
+        if (!reportingManager) {
+          reportingManager = assignedByUser;
+        }
+
+        const parkingAdmins = await userRepo
+          .createQueryBuilder("u")
+          .where(`(:psa = ANY(u.roles) OR :sa = ANY(u.roles))`, {
+            psa: UserRole.PARKING_SUPER_ADMIN,
+            sa: UserRole.SUPER_ADMIN,
+          })
+          .andWhere("u.is_active = true")
+          .getMany();
+
+        const { slotLabel, addressBlock } = listingSummary(listing);
+        const executiveLabel = executive?.name
+          ? `${executive.name} (${executive.phone})`
+          : `Executive #${assignment.executiveUserId}`;
+
+        const decisionLabel = body.decision === "reject" ? "Rejected" : "Sent for manager review";
+        const rejectorLabel = executive?.name
+          ? `${executive.name} (field executive)`
+          : "Field executive";
+        const rejectionNotice =
+          body.decision === "reject"
+            ? formatRejectionNotice({
+                reason: body.comments,
+                rejectedAt: listing.rejectedAt,
+                rejectedByLabel: rejectorLabel,
+              })
+            : null;
+
+        const sharedDetails = [
+          `Decision: ${decisionLabel}`,
+          `Request: ${listing.apartmentName} · Slot ${listing.parkingSlotNumber}`,
+          `Location: ${listing.city}${listing.pinCode ? ` · PIN ${listing.pinCode}` : ""}`,
+          `Address: ${addressBlock}`,
+          `Field executive: ${executiveLabel}`,
+          "",
+          rejectionNotice ?? `Notes: ${body.comments}`,
+        ].join("\n");
+
+        const ownerTitle =
+          body.decision === "reject"
+            ? "Parking verification rejected"
+            : "Field verification completed — awaiting manager review";
+
+        const ownerBody =
+          body.decision === "reject"
+            ? [
+                "Your parking request was rejected after field verification.",
+                "",
+                sharedDetails,
+                "",
+                "You can submit a new parking application with corrected documents if needed.",
+              ].join("\n")
+            : [
+                "Field verification is complete. Your request is now with the verification manager for final approval.",
+                "",
+                sharedDetails,
+              ].join("\n");
+
+        const staffTitle =
+          body.decision === "reject"
+            ? "Field executive rejected a request"
+            : "Field report ready for manager review";
+
+        const staffBody = [
+          `A field executive took action on ${slotLabel}.`,
+          "",
+          sharedDetails,
+          owner
+            ? `\nOwner: ${owner.name ?? "—"} · ${owner.phone}${owner.email ? ` · ${owner.email}` : ""}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const recipients = new Map<number, UserEntity>();
+        if (owner) recipients.set(owner.id, owner);
+        if (executive) recipients.set(executive.id, executive);
+        if (reportingManager) recipients.set(reportingManager.id, reportingManager);
+        for (const admin of parkingAdmins) {
+          recipients.set(admin.id, admin);
+        }
+
+        const notifyJobs: Array<Promise<unknown>> = [];
+        for (const recipient of recipients.values()) {
+          const isOwner = owner != null && recipient.id === owner.id;
+          notifyJobs.push(
+            notify(ds, {
+              userId: recipient.id,
+              toEmail: recipient.email,
+              toPhone: recipient.phone,
+              title: isOwner ? ownerTitle : staffTitle,
+              body: isOwner ? ownerBody : staffBody,
+              referenceType: "parking_listing",
+              referenceId: listing.id,
+            }),
+          );
+        }
+        await Promise.allSettled(notifyJobs);
+
+        return reply.code(201).send({
+          report,
+          assignment: {
+            id: assignment.id,
+            status: assignment.status,
+            completedAt: assignment.completedAt ? toIsoRequired(assignment.completedAt) : null,
+          },
+          listing: serializeListing(listing),
+        });
       });
 
       app.post("/v1/parking/verification/manager-decision", async (request, reply) => {
@@ -876,45 +1456,243 @@ async function main() {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Listing not found" } });
         }
 
-        if (listing.status !== ListingStatus.MANAGER_REVIEW) {
+        if (
+          listing.status !== ListingStatus.MANAGER_REVIEW &&
+          listing.status !== ListingStatus.NEEDS_INFO
+        ) {
           return reply.code(400).send({
             error: {
               code: "INVALID_STATUS",
-              message: "Listing is not awaiting manager review",
+              message: "Listing is not awaiting manager review or needs-info follow-up",
             },
           });
         }
 
+        const managerUserId = requireUserId(request.headers as Record<string, unknown>);
+        const managerRoles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+
         if (body.decision === "approve") {
+          if (listing.status === ListingStatus.NEEDS_INFO) {
+            return reply.code(400).send({
+              error: {
+                code: "INVALID_STATUS",
+                message: "Cannot approve while listing still needs information. Re-assign field verification first.",
+              },
+            });
+          }
           listing.status = ListingStatus.APPROVED;
           listing.isActive = true;
           listing.activatedAt = new Date();
-          listing.rejectionReason = null;
           listing.needsInfoNotes = null;
+          clearListingRejection(listing);
         } else if (body.decision === "reject") {
-          listing.status = ListingStatus.REJECTED;
+          applyListingRejection(listing, {
+            reason: body.comments,
+            rejectedByUserId: managerUserId,
+            rejectedByRole: rejectorRoleLabel(managerRoles),
+          });
+
+          const latestAssignment = await assignmentRepo.findOne({
+            where: { listingId: listing.id },
+            order: { createdAt: "DESC" },
+          });
+          if (latestAssignment) {
+            latestAssignment.status = "rejected";
+            latestAssignment.completedAt = new Date();
+            await assignmentRepo.save(latestAssignment);
+          }
+        } else if (body.decision === "need_info") {
+          listing.status = ListingStatus.NEEDS_INFO;
           listing.isActive = false;
-          listing.rejectionReason = body.comments;
+          listing.needsInfoNotes = body.comments;
+          clearListingRejection(listing);
+
+          const latestAssignment = await assignmentRepo.findOne({
+            where: { listingId: listing.id },
+            order: { createdAt: "DESC" },
+          });
+          if (latestAssignment && latestAssignment.status !== "rejected") {
+            latestAssignment.status = "needs_info";
+            latestAssignment.completedAt = null;
+            await assignmentRepo.save(latestAssignment);
+          }
         } else {
+          // send_back → reopen field verification
           listing.status = ListingStatus.FIELD_IN_PROGRESS;
           listing.needsInfoNotes = body.comments;
+          clearListingRejection(listing);
+          listing.isActive = false;
+
+          const latestAssignment = await assignmentRepo.findOne({
+            where: { listingId: listing.id },
+            order: { createdAt: "DESC" },
+          });
+          if (latestAssignment && latestAssignment.status !== "rejected") {
+            latestAssignment.status = "assigned";
+            latestAssignment.completedAt = null;
+            latestAssignment.dueAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            await assignmentRepo.save(latestAssignment);
+          }
         }
         await listingRepo.save(listing);
 
-        await notify(ds, {
-          userId: listing.ownerUserId,
-          title:
-            body.decision === "approve"
-              ? "Parking Slot Successfully Activated"
-              : "Verification decision update",
-          body:
-            body.decision === "approve"
-              ? "Congratulations! Your parking slot has been successfully verified and activated. Your parking space is now available for customers to book through the application."
-              : body.comments,
-          referenceType: "parking_listing",
-          referenceId: listing.id,
-          channel: "email",
+        const latestAssignment = await assignmentRepo.findOne({
+          where: { listingId: listing.id },
+          order: { createdAt: "DESC" },
         });
+
+        const [owner, executive, assignedByUser] = await Promise.all([
+          userRepo.findOne({ where: { id: listing.ownerUserId } }),
+          latestAssignment
+            ? userRepo.findOne({ where: { id: latestAssignment.executiveUserId } })
+            : Promise.resolve(null),
+          latestAssignment
+            ? userRepo.findOne({ where: { id: latestAssignment.assignedByUserId } })
+            : Promise.resolve(null),
+        ]);
+
+        let reportingManager: UserEntity | null = null;
+        if (executive?.reportingManagerId) {
+          reportingManager = await userRepo.findOne({ where: { id: executive.reportingManagerId } });
+        }
+        if (!reportingManager) {
+          reportingManager = assignedByUser;
+        }
+
+        const parkingAdmins = await userRepo
+          .createQueryBuilder("u")
+          .where(`(:psa = ANY(u.roles) OR :sa = ANY(u.roles))`, {
+            psa: UserRole.PARKING_SUPER_ADMIN,
+            sa: UserRole.SUPER_ADMIN,
+          })
+          .andWhere("u.is_active = true")
+          .getMany();
+
+        const decisionLabel = body.decision.replaceAll("_", " ");
+        const managerUser = await userRepo.findOne({ where: { id: managerUserId } });
+        const rejectorLabel = managerUser?.name
+          ? `${managerUser.name} (${(listing.rejectedByRole ?? "manager").replaceAll("_", " ")})`
+          : (listing.rejectedByRole ?? "manager").replaceAll("_", " ");
+        const rejectionNotice =
+          body.decision === "reject"
+            ? formatRejectionNotice({
+                reason: body.comments,
+                rejectedAt: listing.rejectedAt,
+                rejectedByLabel: rejectorLabel,
+              })
+            : null;
+
+        const ownerTitle =
+          body.decision === "approve"
+            ? "Parking Slot Successfully Activated"
+            : body.decision === "reject"
+              ? "Parking verification rejected"
+              : body.decision === "need_info"
+                ? "More information needed for your parking request"
+                : "Parking request sent back for re-verification";
+        const ownerBody =
+          body.decision === "approve"
+            ? "Congratulations! Your parking slot has been successfully verified and activated. Your parking space is now available for customers to book through the application."
+            : [
+                body.decision === "reject"
+                  ? "Your parking request was rejected by the verification manager."
+                  : body.decision === "need_info"
+                    ? "The verification team requested more information for your parking request."
+                    : "Your request was sent back for another field verification visit.",
+                "",
+                rejectionNotice ?? `Notes: ${body.comments}`,
+                "",
+                `Apartment: ${listing.apartmentName}`,
+                `Slot: ${listing.parkingSlotNumber}`,
+                `City: ${listing.city}`,
+                body.decision === "need_info"
+                  ? "\nPlease update your documents / details so verification can continue."
+                  : body.decision === "reject"
+                    ? "\nYou can submit a new parking application with corrected documents if needed."
+                    : "",
+              ]
+                .filter(Boolean)
+                .join("\n");
+
+        const staffTitle =
+          body.decision === "need_info"
+            ? "Manager requested more info on a request"
+            : body.decision === "reject"
+              ? "Manager rejected a request"
+              : body.decision === "approve"
+                ? "Request approved by manager"
+                : "Request sent back for re-verification";
+        const staffBody = [
+          `Manager decision: ${decisionLabel}`,
+          `Apartment: ${listing.apartmentName}`,
+          `Slot: ${listing.parkingSlotNumber}`,
+          `City: ${listing.city}`,
+          owner ? `Owner: ${owner.name ?? "—"} · ${owner.phone}` : null,
+          executive ? `Field executive: ${executive.name ?? "—"} · ${executive.phone}` : null,
+          "",
+          rejectionNotice ?? `Notes: ${body.comments}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const executiveTitle =
+          body.decision === "reject"
+            ? "Request you verified was rejected"
+            : body.decision === "approve"
+              ? "Request you verified was approved"
+              : body.decision === "need_info"
+                ? "Manager requested more info on your assignment"
+                : "Request sent back for re-verification";
+        const executiveBody = [
+          `Manager decision on your field assignment: ${decisionLabel}`,
+          "",
+          `Apartment: ${listing.apartmentName}`,
+          `Slot: ${listing.parkingSlotNumber}`,
+          `City: ${listing.city}`,
+          "",
+          rejectionNotice ?? `Notes: ${body.comments}`,
+        ].join("\n");
+
+        const recipients = new Map<
+          number,
+          { user: UserEntity; title: string; body: string }
+        >();
+        if (owner) {
+          recipients.set(owner.id, { user: owner, title: ownerTitle, body: ownerBody });
+        }
+        if (executive) {
+          recipients.set(executive.id, {
+            user: executive,
+            title: executiveTitle,
+            body: executiveBody,
+          });
+        }
+        if (reportingManager) {
+          recipients.set(reportingManager.id, {
+            user: reportingManager,
+            title: staffTitle,
+            body: staffBody,
+          });
+        }
+        for (const admin of parkingAdmins) {
+          if (!recipients.has(admin.id)) {
+            recipients.set(admin.id, { user: admin, title: staffTitle, body: staffBody });
+          }
+        }
+
+        await Promise.allSettled(
+          [...recipients.values()].map(({ user, title, body }) =>
+            notify(ds, {
+              userId: user.id,
+              toEmail: user.email,
+              toPhone: user.phone,
+              title,
+              body,
+              referenceType: "parking_listing",
+              referenceId: listing.id,
+            }),
+          ),
+        );
 
         return { listing: serializeListing(listing) };
       });
@@ -963,8 +1741,20 @@ async function main() {
             .map((x) => x.row);
         }
 
-        // Hide slots with overlapping confirmed bookings in requested window
+        // Hide slots with overlapping bookings, and require owner availability hours/days
         if (query.startAt && query.endAt) {
+          const startAt = new Date(query.startAt);
+          const endAt = new Date(query.endAt);
+          if (endAt.getTime() <= startAt.getTime()) {
+            return {
+              items: [],
+              page: query.page,
+              limit: query.limit,
+              total: 0,
+              totalPages: 1,
+            };
+          }
+
           const busy = await bookingRepo
             .createQueryBuilder("b")
             .where("b.listing_id IS NOT NULL")
@@ -976,8 +1766,12 @@ async function main() {
               endAt: query.endAt,
             })
             .getMany();
-          const busyIds = new Set(busy.map((b) => b.listingId).filter(Boolean) as string[]);
-          rows = rows.filter((r) => !busyIds.has(r.id));
+          const busyIds = new Set(busy.map((b) => b.listingId).filter(Boolean) as number[]);
+          rows = rows.filter(
+            (r) =>
+              !busyIds.has(r.id) &&
+              listingFitsAvailability(r, startAt, endAt),
+          );
         }
 
         const total = rows.length;
@@ -1002,6 +1796,18 @@ async function main() {
             error: { code: "UNAVAILABLE", message: "Listing not available" },
           });
         }
+
+        const availability = checkListingAvailability(
+          listing,
+          new Date(body.startAt),
+          new Date(body.endAt),
+        );
+        if (!availability.ok) {
+          return reply.code(400).send({
+            error: { code: availability.code, message: availability.message },
+          });
+        }
+
         const commission = await ensureCommission(ds);
         const quote = calcParkingQuote({
           rentType: listing.rentType,
@@ -1020,6 +1826,17 @@ async function main() {
         if (!listing || listing.status !== ListingStatus.APPROVED) {
           return reply.code(400).send({
             error: { code: "UNAVAILABLE", message: "Listing not available" },
+          });
+        }
+
+        const availability = checkListingAvailability(
+          listing,
+          new Date(body.startAt),
+          new Date(body.endAt),
+        );
+        if (!availability.ok) {
+          return reply.code(400).send({
+            error: { code: availability.code, message: availability.message },
           });
         }
 
@@ -1088,6 +1905,86 @@ async function main() {
           }),
         );
 
+        const customer = await userRepo.findOne({ where: { id: renterUserId } });
+        const owner = await userRepo.findOne({ where: { id: listing.ownerUserId } });
+        const { slotLabel, addressBlock, locationExtra } = listingSummary(listing);
+        const startLabel = new Date(booking.startAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const endLabel = new Date(booking.endAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const amountLabel = formatInr(booking.totalAmountInPaise);
+        const vehicleLabel = [
+          booking.vehicleType ? booking.vehicleType.replaceAll("_", " ") : null,
+          booking.vehicleNumber,
+        ]
+          .filter(Boolean)
+          .join(" · ") || "—";
+
+        if (customer) {
+          await notify(ds, {
+            userId: customer.id,
+            toEmail: customer.email,
+            toPhone: customer.phone,
+            title: "Booking created — complete payment",
+            body: [
+              `Hello ${customer.name ?? "Customer"},`,
+              "",
+              "Your parking booking was created and is awaiting payment.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              locationExtra ? `• Location: ${locationExtra}` : null,
+              `• Address: ${addressBlock}`,
+              `• Check-in: ${startLabel}`,
+              `• Check-out: ${endLabel}`,
+              `• Amount due: ${amountLabel}`,
+              `• Vehicle: ${vehicleLabel}`,
+              "",
+              "Complete payment within 15 minutes to confirm the slot.",
+              "",
+              "— Paashupatastra",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
+
+        if (owner) {
+          await notify(ds, {
+            userId: owner.id,
+            toEmail: owner.email,
+            toPhone: owner.phone,
+            title: "New booking pending payment",
+            body: [
+              `Hello ${owner.name ?? "Owner"},`,
+              "",
+              "A customer started a booking for your parking slot (payment pending).",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              locationExtra ? `• Location: ${locationExtra}` : null,
+              `• Address: ${addressBlock}`,
+              `• Check-in: ${startLabel}`,
+              `• Check-out: ${endLabel}`,
+              `• Amount: ${amountLabel}`,
+              `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              `• Vehicle: ${vehicleLabel}`,
+              "",
+              "You will get another notification with the check-in OTP once payment succeeds.",
+              "",
+              "— Paashupatastra",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
+
         return reply.code(201).send({
           booking: serializeBooking(booking),
           paymentRequired: true,
@@ -1096,8 +1993,8 @@ async function main() {
       });
 
       app.post("/v1/parking/bookings/:id/confirm-payment", async (request, reply) => {
-        const { id } = request.params as { id: string };
-        const actorId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         const body = z
           .object({
             orderId: z.string().min(3).optional(),
@@ -1112,7 +2009,8 @@ async function main() {
           return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your booking" } });
         }
 
-        // Already paid (e.g. Cashfree webhook) — skip duplicate notifications
+        // Payment may already be marked paid by /payments/orders/verify or webhook —
+        // still collect if needed, then always ensure owner/customer notifications.
         const wasPaid = booking.paymentStatus === "paid";
         if (!wasPaid) {
           try {
@@ -1137,18 +2035,6 @@ async function main() {
           });
         }
 
-        if (wasPaid) {
-          const listingPaid = booking.listingId
-            ? await listingRepo.findOne({ where: { id: booking.listingId } })
-            : null;
-          return {
-            booking: serializeBooking(booking),
-            listing: listingPaid ? serializeListing(listingPaid) : null,
-            message: "Booking already paid and confirmed.",
-            alreadyConfirmed: true,
-          };
-        }
-
         const listing = booking.listingId
           ? await listingRepo.findOne({ where: { id: booking.listingId } })
           : null;
@@ -1157,116 +2043,23 @@ async function main() {
           ? await userRepo.findOne({ where: { id: booking.ownerUserId } })
           : null;
 
-        const { slotLabel, addressBlock, navUrl } = listingSummary(listing);
-        const startLabel = new Date(booking.startAt).toLocaleString("en-IN");
-        const endLabel = new Date(booking.endAt).toLocaleString("en-IN");
-        const amountLabel = formatInr(booking.totalAmountInPaise || booking.amountInPaise);
-        const coords =
-          listing?.latitude != null && listing?.longitude != null
-            ? `${listing.latitude}, ${listing.longitude}`
-            : null;
+        await notifyBookingConfirmed(ds, { booking, listing, customer, owner });
 
-        if (customer) {
-          const customerBody = [
-            `Hello ${customer.name ?? "Customer"},`,
-            "",
-            "Your parking booking is confirmed. Payment received successfully.",
-            "",
-            "Booking details",
-            `• Booking ID: ${booking.id}`,
-            `• Parking: ${slotLabel}`,
-            `• Address: ${addressBlock}`,
-            coords ? `• Coordinates: ${coords}` : null,
-            `• Check-in: ${startLabel}`,
-            `• Check-out: ${endLabel}`,
-            `• Amount paid: ${amountLabel}`,
-            `• Vehicle: ${booking.vehicleNumber ?? "—"}`,
-            navUrl ? `• Navigate: ${navUrl}` : null,
-            "",
-            "Next steps",
-            "1. Open My bookings in the app for live map navigation to the slot.",
-            "2. On arrival, ask the owner for the check-in OTP.",
-            "3. Enter the OTP to start your parking session.",
-            "4. You will get a reminder 5 minutes before check-out.",
-            "",
-            "— Paashupatastra",
-          ]
-            .filter((line) => line !== null)
-            .join("\n");
-          await notify(ds, {
-            userId: customer.id,
-            toEmail: customer.email,
-            toPhone: customer.phone,
-            title: "Booking confirmed — navigate to your parking slot",
-            body: customerBody,
-            referenceType: "parking_booking",
-            referenceId: booking.id,
-          });
-        }
-
-        if (owner && booking.ownerUserId) {
-          const customerName = customer?.name ?? "Customer";
-          const customerPhoneMasked = customer?.phone
-            ? `${customer.phone.slice(0, 2)}******${customer.phone.slice(-2)}`
-            : "—";
-          const ownerShareHint = formatInr(
-            Math.max(
-              0,
-              (booking.totalAmountInPaise || booking.amountInPaise) -
-                (booking.platformFeeInPaise || 0) -
-                (booking.taxInPaise || 0),
-            ),
-          );
-          const ownerBody = [
-            `Hello ${owner.name ?? "Owner"},`,
-            "",
-            "A customer has paid and confirmed a booking for your parking slot.",
-            "",
-            "Slot details",
-            `• Parking: ${slotLabel}`,
-            `• Address: ${addressBlock}`,
-            `• Check-in window: ${startLabel} → ${endLabel}`,
-            "",
-            "Customer (minimal)",
-            `• Name: ${customerName}`,
-            `• Mobile (masked): ${customerPhoneMasked}`,
-            `• Vehicle: ${booking.vehicleNumber ?? "—"}`,
-            `• Booking ID: ${booking.id.slice(0, 8)}…`,
-            "",
-            "Check-in OTP",
-            `• Share this OTP only when the customer arrives: ${booking.ownerOtp}`,
-            "",
-            "Payment",
-            `• Gross paid: ${amountLabel} (held in platform wallet)`,
-            `• Platform fee: ${formatInr(booking.platformFeeInPaise || 0)}`,
-            `• Estimated credit after check-out: ${ownerShareHint}`,
-            "",
-            "After the customer checks out, settlement will credit your owner wallet.",
-            "",
-            "— Paashupatastra",
-          ].join("\n");
-          await notify(ds, {
-            userId: owner.id,
-            toEmail: owner.email,
-            toPhone: owner.phone,
-            title: `New paid booking — OTP ${booking.ownerOtp}`,
-            body: ownerBody,
-            referenceType: "parking_booking",
-            referenceId: booking.id,
-          });
-        }
-
+        const { navUrl } = listingSummary(listing);
         return {
           booking: serializeBooking(booking),
           listing: listing ? serializeListing(listing) : null,
           navigationUrl: navUrl,
-          message: "Payment successful. Funds credited to platform wallet. Emails/notifications sent.",
+          alreadyConfirmed: wasPaid,
+          message: wasPaid
+            ? "Booking already paid and confirmed. Notifications ensured."
+            : "Payment successful. Funds credited to platform wallet. Emails/notifications sent.",
         };
       });
 
       app.post("/v1/parking/bookings/:id/check-in", async (request, reply) => {
-        const { id } = request.params as { id: string };
-        const actorId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         const body = (request.body ?? {}) as { code?: string; otp?: string };
         const code = (body.code ?? body.otp ?? "").trim();
         if (!code) {
@@ -1295,14 +2088,82 @@ async function main() {
         booking.checkedInAt = new Date();
         await bookingRepo.save(booking);
 
+        const listing = booking.listingId
+          ? await listingRepo.findOne({ where: { id: booking.listingId } })
+          : null;
+        const { slotLabel, addressBlock, locationExtra } = listingSummary(listing);
         const customer = await userRepo.findOne({ where: { id: booking.renterUserId } });
+        const owner = booking.ownerUserId
+          ? await userRepo.findOne({ where: { id: booking.ownerUserId } })
+          : null;
+        const checkedInLabel = new Date(booking.checkedInAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const plannedOutLabel = new Date(booking.endAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const vehicleLabel = [
+          booking.vehicleType ? booking.vehicleType.replaceAll("_", " ") : null,
+          booking.vehicleNumber,
+        ]
+          .filter(Boolean)
+          .join(" · ") || "—";
+
         if (customer) {
           await notify(ds, {
             userId: customer.id,
             toEmail: customer.email,
-            channel: "email",
+            toPhone: customer.phone,
             title: "Check-in successful",
-            body: `Your parking session started at ${new Date(booking.checkedInAt).toLocaleString("en-IN")}. Planned check-out: ${new Date(booking.endAt).toLocaleString("en-IN")}.`,
+            body: [
+              `Hello ${customer.name ?? "Customer"},`,
+              "",
+              "You have checked in successfully. Your parking session has started.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              locationExtra ? `• Location: ${locationExtra}` : null,
+              `• Address: ${addressBlock}`,
+              `• Checked in at: ${checkedInLabel}`,
+              `• Planned check-out: ${plannedOutLabel}`,
+              `• Vehicle: ${vehicleLabel}`,
+              "",
+              "Remember to check out in the app when you leave.",
+              "",
+              "— Paashupatastra",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
+
+        if (owner) {
+          await notify(ds, {
+            userId: owner.id,
+            toEmail: owner.email,
+            toPhone: owner.phone,
+            title: "Customer checked in",
+            body: [
+              `Hello ${owner.name ?? "Owner"},`,
+              "",
+              "A customer has checked in at your parking slot.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              locationExtra ? `• Location: ${locationExtra}` : null,
+              `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              `• Vehicle: ${vehicleLabel}`,
+              `• Checked in at: ${checkedInLabel}`,
+              `• Planned check-out: ${plannedOutLabel}`,
+              "",
+              "You will be notified again when they check out and your wallet is credited.",
+              "",
+              "— Paashupatastra",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
             referenceType: "parking_booking",
             referenceId: booking.id,
           });
@@ -1312,8 +2173,8 @@ async function main() {
       });
 
       app.post("/v1/parking/bookings/:id/check-out", async (request, reply) => {
-        const { id } = request.params as { id: string };
-        const actorId = getUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         let booking = await bookingRepo.findOne({ where: { id } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
@@ -1347,45 +2208,160 @@ async function main() {
           app.log.error({ err, bookingId: booking.id }, "Auto settlement failed");
         }
 
+        const listing = booking.listingId
+          ? await listingRepo.findOne({ where: { id: booking.listingId } })
+          : null;
+        const { slotLabel, addressBlock, locationExtra } = listingSummary(listing);
         const owner = booking.ownerUserId
           ? await userRepo.findOne({ where: { id: booking.ownerUserId } })
           : null;
         const customer = await userRepo.findOne({ where: { id: booking.renterUserId } });
         const ownerShare = settlement?.ownerShareInPaise ?? 0;
-        const platformFee = settlement?.platformFeeInPaise ?? booking.platformFeeInPaise;
+        const platformFee = settlement?.platformFeeInPaise ?? booking.platformFeeInPaise ?? 0;
+        const checkedOutLabel = new Date(booking.checkedOutAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const checkedInLabel = booking.checkedInAt
+          ? new Date(booking.checkedInAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+          : "—";
+        const vehicleLabel = [
+          booking.vehicleType ? booking.vehicleType.replaceAll("_", " ") : null,
+          booking.vehicleNumber,
+        ]
+          .filter(Boolean)
+          .join(" · ") || "—";
+        const grossLabel = formatInr(booking.totalAmountInPaise || booking.amountInPaise);
 
         if (owner) {
           await notify(ds, {
             userId: owner.id,
             toEmail: owner.email,
             toPhone: owner.phone,
-            title: settlement
-              ? "Customer checked out — payout credited"
-              : "Customer checked out — payout pending",
+            title: "Customer checked out",
             body: [
               `Hello ${owner.name ?? "Owner"},`,
               "",
-              "The customer has checked out.",
-              `• Booking: ${booking.id.slice(0, 8)}…`,
-              `• Gross paid: ${formatInr(booking.totalAmountInPaise || booking.amountInPaise)}`,
+              "The customer has checked out of your parking slot.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              locationExtra ? `• Location: ${locationExtra}` : null,
+              `• Address: ${addressBlock}`,
+              `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              `• Vehicle: ${vehicleLabel}`,
+              `• Checked in: ${checkedInLabel}`,
+              `• Checked out: ${checkedOutLabel}`,
+              `• Gross paid: ${grossLabel}`,
               `• Platform fee: ${formatInr(platformFee)}`,
-              settlement
-                ? `• Credited to your wallet: ${formatInr(ownerShare)}`
-                : `• Wallet credit pending: ${settlementError ?? "retry shortly"}`,
               "",
               "— Paashupatastra",
-            ].join("\n"),
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
             referenceType: "parking_booking",
             referenceId: booking.id,
           });
+
+          if (settlement && !settlement.alreadySettled) {
+            await notify(ds, {
+              userId: owner.id,
+              toEmail: owner.email,
+              toPhone: owner.phone,
+              title: `Wallet credited — ${formatInr(ownerShare)}`,
+              body: [
+                `Hello ${owner.name ?? "Owner"},`,
+                "",
+                "Your parking owner wallet has been credited after customer check-out.",
+                "",
+                `• Booking ID: ${booking.id}`,
+                `• Parking: ${slotLabel}`,
+                `• Gross paid: ${grossLabel}`,
+                `• Platform fee deducted: ${formatInr(platformFee)}`,
+                `• Amount added to wallet: ${formatInr(ownerShare)}`,
+                settlement.ownerBalanceInPaise != null
+                  ? `• New wallet balance: ${formatInr(settlement.ownerBalanceInPaise)}`
+                  : null,
+                "",
+                "You can withdraw available balance from Owner wallet.",
+                "",
+                "— Paashupatastra",
+              ]
+                .filter((line) => line !== null)
+                .join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          } else if (settlementError) {
+            await notify(ds, {
+              userId: owner.id,
+              toEmail: owner.email,
+              toPhone: owner.phone,
+              title: "Wallet credit pending",
+              body: [
+                `Hello ${owner.name ?? "Owner"},`,
+                "",
+                "Customer checked out, but wallet credit could not be completed yet.",
+                `• Booking ID: ${booking.id}`,
+                `• Reason: ${settlementError}`,
+                "",
+                "We will retry settlement. Contact support if this persists.",
+                "",
+                "— Paashupatastra",
+              ].join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          } else if (settlement?.alreadySettled) {
+            // Already credited earlier — still confirm wallet state briefly
+            await notify(ds, {
+              userId: owner.id,
+              toEmail: owner.email,
+              toPhone: owner.phone,
+              title: `Wallet already credited — ${formatInr(ownerShare)}`,
+              body: [
+                `Hello ${owner.name ?? "Owner"},`,
+                "",
+                "This booking was already settled to your wallet.",
+                `• Booking ID: ${booking.id}`,
+                `• Amount: ${formatInr(ownerShare)}`,
+                settlement.ownerBalanceInPaise != null
+                  ? `• Wallet balance: ${formatInr(settlement.ownerBalanceInPaise)}`
+                  : null,
+                "",
+                "— Paashupatastra",
+              ]
+                .filter((line) => line !== null)
+                .join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          }
         }
 
         if (customer) {
           await notify(ds, {
             userId: customer.id,
             toEmail: customer.email,
-            title: "Parking check-out complete",
-            body: `Thanks for using Paashupatastra. Your session ended at ${new Date(booking.checkedOutAt!).toLocaleString("en-IN")}.`,
+            toPhone: customer.phone,
+            title: "Check-out successful",
+            body: [
+              `Hello ${customer.name ?? "Customer"},`,
+              "",
+              "You have checked out successfully. Thanks for using Paashupatastra.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              locationExtra ? `• Location: ${locationExtra}` : null,
+              `• Address: ${addressBlock}`,
+              `• Checked in: ${checkedInLabel}`,
+              `• Checked out: ${checkedOutLabel}`,
+              `• Amount paid: ${grossLabel}`,
+              `• Vehicle: ${vehicleLabel}`,
+              "",
+              "— Paashupatastra",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
             referenceType: "parking_booking",
             referenceId: booking.id,
           });
@@ -1399,19 +2375,57 @@ async function main() {
         };
       });
 
-      app.get("/v1/parking/bookings", async (request) => {
+      app.get("/v1/parking/bookings", async (request, reply) => {
         const parsed = paginationQuerySchema.parse(request.query);
         const raw = request.query as {
           renterUserId?: string;
           ownerUserId?: string;
           status?: string;
+          mine?: string;
         };
-        const qb = bookingRepo.createQueryBuilder("b").orderBy("b.created_at", "DESC");
-        if (raw.renterUserId) {
-          qb.andWhere("b.renter_user_id = :renterUserId", { renterUserId: raw.renterUserId });
+        const headers = request.headers as Record<string, unknown>;
+        const currentUserId = parseUserIdFromHeaders(headers);
+        const roles = getRolesFromHeaders(headers);
+        const isStaffViewer =
+          roles.includes(UserRole.SUPER_ADMIN) ||
+          roles.includes(UserRole.PARKING_SUPER_ADMIN) ||
+          roles.includes(UserRole.VERIFICATION_MANAGER);
+
+        let renterFilter: number | null = null;
+        let ownerFilter: number | null = null;
+        try {
+          if (raw.renterUserId) renterFilter = parseEntityId(raw.renterUserId);
+          if (raw.ownerUserId) ownerFilter = parseEntityId(raw.ownerUserId);
+        } catch {
+          return reply.code(400).send({
+            error: { code: "INVALID_ID", message: "Invalid user id filter" },
+          });
         }
-        if (raw.ownerUserId) {
-          qb.andWhere("b.owner_user_id = :ownerUserId", { ownerUserId: raw.ownerUserId });
+
+        // Customers/owners must only see their own bookings (bound to JWT / x-user-id)
+        if (!isStaffViewer) {
+          if (currentUserId == null) {
+            return reply.code(401).send({
+              error: { code: "UNAUTHORIZED", message: "Sign in to view bookings" },
+            });
+          }
+          const wantOwner =
+            raw.mine === "owner" || (ownerFilter != null && renterFilter == null);
+          if (wantOwner) {
+            ownerFilter = currentUserId;
+            renterFilter = null;
+          } else {
+            renterFilter = currentUserId;
+            ownerFilter = null;
+          }
+        }
+
+        const qb = bookingRepo.createQueryBuilder("b").orderBy("b.created_at", "DESC");
+        if (renterFilter != null) {
+          qb.andWhere("b.renter_user_id = :renterUserId", { renterUserId: renterFilter });
+        }
+        if (ownerFilter != null) {
+          qb.andWhere("b.owner_user_id = :ownerUserId", { ownerUserId: ownerFilter });
         }
         if (raw.status) qb.andWhere("b.status = :status", { status: raw.status });
         if (parsed.q) {
@@ -1423,9 +2437,9 @@ async function main() {
         const total = await qb.getCount();
         const rows = await qb.skip((parsed.page - 1) * parsed.limit).take(parsed.limit).getMany();
 
-        const listingIds = [...new Set(rows.map((r) => r.listingId).filter(Boolean) as string[])];
+        const listingIds = [...new Set(rows.map((r) => r.listingId).filter(Boolean) as number[])];
         const renterIds = [...new Set(rows.map((r) => r.renterUserId))];
-        const ownerIds = [...new Set(rows.map((r) => r.ownerUserId).filter(Boolean) as string[])];
+        const ownerIds = [...new Set(rows.map((r) => r.ownerUserId).filter(Boolean) as number[])];
         const listings =
           listingIds.length > 0 ? await listingRepo.find({ where: { id: In(listingIds) } }) : [];
         const renters =
@@ -1436,7 +2450,7 @@ async function main() {
         const renterById = new Map(renters.map((u) => [u.id, u]));
         const ownerById = new Map(owners.map((u) => [u.id, u]));
 
-        const hideOwnerOtp = Boolean(raw.renterUserId) && !raw.ownerUserId;
+        const hideOwnerOtp = renterFilter != null && ownerFilter == null;
         const isCustomerView = hideOwnerOtp;
 
         return {
@@ -1497,7 +2511,7 @@ async function main() {
       });
 
       app.delete("/v1/parking/bookings/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const booking = await bookingRepo.findOne({ where: { id } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
@@ -1546,7 +2560,7 @@ async function main() {
       });
 
       app.patch("/v1/parking/slots/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const existing = await slotRepo.findOne({ where: { id } });
         if (!existing) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Slot not found" } });
@@ -1557,7 +2571,7 @@ async function main() {
       });
 
       app.delete("/v1/parking/slots/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const result = await slotRepo.delete({ id });
         if (!result.affected) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Slot not found" } });
@@ -1566,7 +2580,7 @@ async function main() {
       });
 
       app.post("/v1/parking/slots/:id/approve", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const slot = await slotRepo.findOne({ where: { id } });
         if (!slot) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Slot not found" } });
@@ -1576,7 +2590,7 @@ async function main() {
       });
 
       app.post("/v1/parking/slots/:id/reject", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const slot = await slotRepo.findOne({ where: { id } });
         if (!slot) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Slot not found" } });
@@ -1632,17 +2646,83 @@ async function main() {
     },
   });
 
-  // Remind customers 5 minutes before planned check-out; expire unpaid holds
+  // Remind 5 minutes before check-out; awaiting check-in every 5 min; overdue every 5 min; expire unpaid
   setInterval(() => {
     void (async () => {
       const now = new Date();
       const inFive = new Date(now.getTime() + 5 * 60 * 1000);
+      const fiveMinCutoff = new Date(now.getTime() - 5 * 60 * 1000);
 
+      // Paid + confirmed, check-in window started, never checked in → remind customer every 5 minutes until end
+      const awaitingCheckIn = await bookingRepo
+        .createQueryBuilder("b")
+        .where("b.status = :status", { status: BookingStatus.CONFIRMED })
+        .andWhere("b.checked_in_at IS NULL")
+        .andWhere("b.payment_status = :paid", { paid: "paid" })
+        .andWhere("b.start_at <= :now", { now })
+        .andWhere("b.end_at > :now", { now })
+        .andWhere(
+          "(b.last_check_in_reminder_at IS NULL OR b.last_check_in_reminder_at <= :cutoff)",
+          { cutoff: fiveMinCutoff },
+        )
+        .getMany();
+
+      for (const booking of awaitingCheckIn) {
+        const customer = await userRepo.findOne({ where: { id: booking.renterUserId } });
+        if (!customer) {
+          booking.lastCheckInReminderAt = now;
+          await bookingRepo.save(booking);
+          continue;
+        }
+        const listing = booking.listingId
+          ? await listingRepo.findOne({ where: { id: booking.listingId } })
+          : null;
+        const { slotLabel, addressBlock } = listingSummary(listing);
+        const startLabel = new Date(booking.startAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const endLabel = new Date(booking.endAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const minsLeft = Math.max(
+          1,
+          Math.ceil((new Date(booking.endAt).getTime() - now.getTime()) / 60_000),
+        );
+
+        await notify(ds, {
+          userId: customer.id,
+          toEmail: customer.email,
+          toPhone: customer.phone,
+          title: "Check-in pending — please check in",
+          body: [
+            `Hello ${customer.name ?? "Customer"},`,
+            "",
+            "Your parking check-in time has started and you have not checked in yet.",
+            "",
+            `• Booking ID: ${booking.id}`,
+            `• Parking: ${slotLabel}`,
+            `• Address: ${addressBlock}`,
+            `• Planned start: ${startLabel}`,
+            `• Planned end: ${endLabel}`,
+            `• Time left to check in: about ${minsLeft} min`,
+            "",
+            "Get the OTP from the owner and check in in the app.",
+            "If you do not check in by the planned end time, the booking will be marked completed and payment will go to the owner.",
+            "",
+            "— Paashupatastra",
+          ].join("\n"),
+          referenceType: "parking_booking",
+          referenceId: booking.id,
+        });
+
+        booking.lastCheckInReminderAt = now;
+        await bookingRepo.save(booking);
+      }
+
+      // Checked-in sessions: remind 5 minutes before planned check-out
       const dueReminders = await bookingRepo
         .createQueryBuilder("b")
-        .where("b.status IN (:...statuses)", {
-          statuses: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN],
-        })
+        .where("b.status = :status", { status: BookingStatus.CHECKED_IN })
         .andWhere("b.reminder_5_sent = false")
         .andWhere("b.end_at > :now", { now })
         .andWhere("b.end_at <= :inFive", { inFive })
@@ -1650,6 +2730,17 @@ async function main() {
 
       for (const booking of dueReminders) {
         const customer = await userRepo.findOne({ where: { id: booking.renterUserId } });
+        const owner = booking.ownerUserId
+          ? await userRepo.findOne({ where: { id: booking.ownerUserId } })
+          : null;
+        const listing = booking.listingId
+          ? await listingRepo.findOne({ where: { id: booking.listingId } })
+          : null;
+        const { slotLabel } = listingSummary(listing);
+        const endLabel = new Date(booking.endAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+
         if (customer) {
           await notify(ds, {
             userId: customer.id,
@@ -1660,8 +2751,9 @@ async function main() {
               `Hello ${customer.name ?? "Customer"},`,
               "",
               "Your parking session ends in about 5 minutes.",
-              `• Booking: ${booking.id.slice(0, 8)}…`,
-              `• Planned check-out: ${new Date(booking.endAt).toLocaleString("en-IN")}`,
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              `• Planned check-out: ${endLabel}`,
               "",
               "Please wrap up and complete check-out in the app.",
               "",
@@ -1671,7 +2763,363 @@ async function main() {
             referenceId: booking.id,
           });
         }
+        if (owner) {
+          await notify(ds, {
+            userId: owner.id,
+            toEmail: owner.email,
+            toPhone: owner.phone,
+            title: "Customer check-out due in 5 minutes",
+            body: [
+              `Hello ${owner.name ?? "Owner"},`,
+              "",
+              "A customer's planned check-out is in about 5 minutes.",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              `• Planned check-out: ${endLabel}`,
+              "",
+              "— Paashupatastra",
+            ].join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
         booking.reminder5Sent = true;
+        await bookingRepo.save(booking);
+      }
+
+      // Confirmed + never checked in + past planned end → auto-complete and settle to owner
+      const noShowBookings = await bookingRepo
+        .createQueryBuilder("b")
+        .where("b.status = :status", { status: BookingStatus.CONFIRMED })
+        .andWhere("b.checked_in_at IS NULL")
+        .andWhere("b.end_at < :now", { now })
+        .andWhere("b.payment_status = :paid", { paid: "paid" })
+        .getMany();
+
+      for (const booking of noShowBookings) {
+        booking.status = BookingStatus.COMPLETED;
+        booking.checkedOutAt = now;
+        await bookingRepo.save(booking);
+
+        let settlement: Awaited<ReturnType<typeof settlePayment>> | null = null;
+        let settlementError: string | null = null;
+        try {
+          settlement = await settlePayment(booking.id);
+        } catch (err) {
+          settlementError = err instanceof Error ? err.message : "Settlement failed";
+          // eslint-disable-next-line no-console
+          console.error("no-show settlement failed", { err, bookingId: booking.id });
+        }
+
+        const customer = await userRepo.findOne({ where: { id: booking.renterUserId } });
+        const owner = booking.ownerUserId
+          ? await userRepo.findOne({ where: { id: booking.ownerUserId } })
+          : null;
+        const listing = booking.listingId
+          ? await listingRepo.findOne({ where: { id: booking.listingId } })
+          : null;
+        const { slotLabel, addressBlock } = listingSummary(listing);
+        const endLabel = new Date(booking.endAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const startLabel = new Date(booking.startAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const ownerShare = settlement?.ownerShareInPaise ?? 0;
+        const platformFee = settlement?.platformFeeInPaise ?? booking.platformFeeInPaise ?? 0;
+        const grossLabel = formatInr(booking.totalAmountInPaise || booking.amountInPaise);
+
+        if (customer) {
+          await notify(ds, {
+            userId: customer.id,
+            toEmail: customer.email,
+            toPhone: customer.phone,
+            title: "Booking completed — no check-in",
+            body: [
+              `Hello ${customer.name ?? "Customer"},`,
+              "",
+              "Your parking booking ended without check-in, so it was marked completed.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              `• Address: ${addressBlock}`,
+              `• Planned start: ${startLabel}`,
+              `• Planned end: ${endLabel}`,
+              `• Amount paid: ${grossLabel}`,
+              "",
+              "Payment has been released to the parking owner as per booking rules.",
+              "",
+              "— Paashupatastra",
+            ].join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
+
+        if (owner) {
+          await notify(ds, {
+            userId: owner.id,
+            toEmail: owner.email,
+            toPhone: owner.phone,
+            title: "Booking auto-completed — customer did not check in",
+            body: [
+              `Hello ${owner.name ?? "Owner"},`,
+              "",
+              "A customer paid but did not check in before the planned end time. The booking was marked completed.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              `• Address: ${addressBlock}`,
+              `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              `• Planned start: ${startLabel}`,
+              `• Planned end: ${endLabel}`,
+              `• Gross paid: ${grossLabel}`,
+              `• Platform fee: ${formatInr(platformFee)}`,
+              "",
+              "— Paashupatastra",
+            ].join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+
+          if (settlement && !settlement.alreadySettled) {
+            await notify(ds, {
+              userId: owner.id,
+              toEmail: owner.email,
+              toPhone: owner.phone,
+              title: `Wallet credited — ${formatInr(ownerShare)}`,
+              body: [
+                `Hello ${owner.name ?? "Owner"},`,
+                "",
+                "Your parking owner wallet has been credited after a no-show booking auto-completed.",
+                "",
+                `• Booking ID: ${booking.id}`,
+                `• Parking: ${slotLabel}`,
+                `• Gross paid: ${grossLabel}`,
+                `• Platform fee deducted: ${formatInr(platformFee)}`,
+                `• Amount added to wallet: ${formatInr(ownerShare)}`,
+                settlement.ownerBalanceInPaise != null
+                  ? `• New wallet balance: ${formatInr(settlement.ownerBalanceInPaise)}`
+                  : null,
+                "",
+                "You can withdraw available balance from Owner wallet.",
+                "",
+                "— Paashupatastra",
+              ]
+                .filter((line) => line !== null)
+                .join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          } else if (settlementError) {
+            await notify(ds, {
+              userId: owner.id,
+              toEmail: owner.email,
+              toPhone: owner.phone,
+              title: "Wallet credit pending",
+              body: [
+                `Hello ${owner.name ?? "Owner"},`,
+                "",
+                "No-show booking was completed, but wallet credit could not be finished yet.",
+                `• Booking ID: ${booking.id}`,
+                `• Reason: ${settlementError}`,
+                "",
+                "We will retry settlement. Contact support if this persists.",
+                "",
+                "— Paashupatastra",
+              ].join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          }
+        }
+      }
+
+      // Past planned check-out after check-in → remind every 5 minutes until blocked
+      const overdueBookings = await bookingRepo
+        .createQueryBuilder("b")
+        .where("b.status = :status", { status: BookingStatus.CHECKED_IN })
+        .andWhere("b.end_at < :now", { now })
+        .andWhere("b.overdue_accounts_blocked_at IS NULL")
+        .andWhere(
+          "(b.last_overdue_reminder_at IS NULL OR b.last_overdue_reminder_at <= :cutoff)",
+          { cutoff: fiveMinCutoff },
+        )
+        .getMany();
+
+      for (const booking of overdueBookings) {
+        const customer = await userRepo.findOne({ where: { id: booking.renterUserId } });
+        const owner = booking.ownerUserId
+          ? await userRepo.findOne({ where: { id: booking.ownerUserId } })
+          : null;
+        const listing = booking.listingId
+          ? await listingRepo.findOne({ where: { id: booking.listingId } })
+          : null;
+        const { slotLabel, addressBlock } = listingSummary(listing);
+        const endLabel = new Date(booking.endAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+        const overdueMins = Math.max(
+          1,
+          Math.floor((now.getTime() - new Date(booking.endAt).getTime()) / 60_000),
+        );
+        const overdueLabel =
+          overdueMins >= 60
+            ? `${Math.floor(overdueMins / 60)} hr ${overdueMins % 60} min`
+            : `${overdueMins} min`;
+
+        // After 1 hour overdue: deactivate customer + owner accounts
+        if (overdueMins >= 60) {
+          const blockReason = [
+            "Account deactivated automatically: parking check-out overdue by more than 1 hour.",
+            `Booking ID: ${booking.id}.`,
+            `Parking: ${slotLabel}.`,
+            `Planned check-out: ${endLabel}.`,
+            `Overdue by: ${overdueLabel}.`,
+            "Contact Parking Super Admin to reactivate your account.",
+          ].join(" ");
+
+          const deactivateUser = async (u: UserEntity, party: "customer" | "owner") => {
+            if (!u.isActive && u.deactivationReason?.includes("check-out overdue")) {
+              return;
+            }
+            u.isActive = false;
+            u.deactivationReason = blockReason;
+            u.deactivatedAt = now;
+            u.deactivatedBy = "system:overdue_checkout";
+            await userRepo.save(u);
+            await notify(ds, {
+              userId: u.id,
+              toEmail: u.email,
+              toPhone: u.phone,
+              title: "Account deactivated — overdue check-out",
+              body: [
+                `Hello ${u.name ?? (party === "owner" ? "Owner" : "Customer")},`,
+                "",
+                "Your Paashupatastra parking account has been set to inactive.",
+                "",
+                `Reason: ${blockReason}`,
+                "",
+                party === "customer"
+                  ? "You did not complete check-out within 1 hour after the planned end time."
+                  : "A customer on your parking slot did not check out within 1 hour after the planned end time.",
+                "",
+                "You cannot log in until a Parking Super Admin reactivates your account.",
+                "",
+                "— Paashupatastra",
+              ].join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          };
+
+          if (customer) await deactivateUser(customer, "customer");
+          if (owner) await deactivateUser(owner, "owner");
+
+          const admins = await userRepo
+            .createQueryBuilder("u")
+            .where("u.is_active = true")
+            .andWhere(
+              `(:sa = ANY(u.roles) OR :psa = ANY(u.roles))`,
+              { sa: UserRole.SUPER_ADMIN, psa: UserRole.PARKING_SUPER_ADMIN },
+            )
+            .getMany();
+
+          for (const admin of admins) {
+            await notify(ds, {
+              userId: admin.id,
+              toEmail: admin.email,
+              toPhone: admin.phone,
+              title: `Accounts blocked — booking #${booking.id} overdue >1h`,
+              body: [
+                `Hello ${admin.name ?? "Admin"},`,
+                "",
+                "Customer and owner accounts were auto-deactivated after check-out overdue > 1 hour.",
+                "",
+                `• Booking ID: ${booking.id}`,
+                `• Parking: ${slotLabel}`,
+                `• Address: ${addressBlock}`,
+                `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"} (id ${customer?.id ?? "—"})`,
+                `• Owner: ${owner?.name ?? "—"} · ${owner?.phone ?? "—"} (id ${owner?.id ?? "—"})`,
+                `• Planned check-out: ${endLabel}`,
+                `• Overdue by: ${overdueLabel}`,
+                "",
+                "Reactivate accounts from Users & staff when the issue is resolved.",
+                "",
+                "— Paashupatastra",
+              ].join("\n"),
+              referenceType: "parking_booking",
+              referenceId: booking.id,
+            });
+          }
+
+          booking.overdueAccountsBlockedAt = now;
+          booking.lastOverdueReminderAt = now;
+          await bookingRepo.save(booking);
+          continue;
+        }
+
+        if (customer) {
+          await notify(ds, {
+            userId: customer.id,
+            toEmail: customer.email,
+            toPhone: customer.phone,
+            title: `Overdue check-out — ${overdueLabel} late`,
+            body: [
+              `Hello ${customer.name ?? "Customer"},`,
+              "",
+              "Your planned check-out time has passed and you have not checked out yet.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              `• Address: ${addressBlock}`,
+              `• Planned check-out: ${endLabel}`,
+              `• Overdue by: ${overdueLabel}`,
+              "",
+              "Please open My bookings and complete check-out now.",
+              "If you exceed 1 hour overdue, both your account and the owner's account will be deactivated.",
+              "",
+              "— Paashupatastra",
+            ].join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
+
+        if (owner) {
+          await notify(ds, {
+            userId: owner.id,
+            toEmail: owner.email,
+            toPhone: owner.phone,
+            title: `Customer overdue — ${overdueLabel} past check-out`,
+            body: [
+              `Hello ${owner.name ?? "Owner"},`,
+              "",
+              "A customer has not checked out after their planned end time.",
+              "",
+              `• Booking ID: ${booking.id}`,
+              `• Parking: ${slotLabel}`,
+              `• Address: ${addressBlock}`,
+              `• Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              `• Vehicle: ${
+                [booking.vehicleType?.replaceAll("_", " "), booking.vehicleNumber]
+                  .filter(Boolean)
+                  .join(" · ") || "—"
+              }`,
+              `• Planned check-out: ${endLabel}`,
+              `• Overdue by: ${overdueLabel}`,
+              "",
+              "Ask the customer to check out. If overdue exceeds 1 hour, both accounts will be deactivated automatically.",
+              "",
+              "— Paashupatastra",
+            ].join("\n"),
+            referenceType: "parking_booking",
+            referenceId: booking.id,
+          });
+        }
+
+        booking.lastOverdueReminderAt = now;
         await bookingRepo.save(booking);
       }
 

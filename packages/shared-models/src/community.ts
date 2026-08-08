@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const communitySchema = z.object({
-  id: z.string().uuid(),
+  id: z.coerce.number().int().positive(),
   name: z.string().min(2).max(160),
   slug: z.string().min(2).max(80),
   city: z.string().min(2).max(80),
@@ -17,8 +17,8 @@ export const communitySchema = z.object({
 export type Community = z.infer<typeof communitySchema>;
 
 export const apartmentSchema = z.object({
-  id: z.string().uuid(),
-  communityId: z.string().uuid(),
+  id: z.coerce.number().int().positive(),
+  communityId: z.coerce.number().int().positive(),
   name: z.string().min(2).max(160),
   inviteCode: z.string().min(4).max(16),
   addressLine: z.string().min(2).max(240),
@@ -30,23 +30,23 @@ export const apartmentSchema = z.object({
 export type Apartment = z.infer<typeof apartmentSchema>;
 
 export const blockSchema = z.object({
-  id: z.string().uuid(),
-  apartmentId: z.string().uuid(),
+  id: z.coerce.number().int().positive(),
+  apartmentId: z.coerce.number().int().positive(),
   name: z.string().min(1).max(40),
 });
 
 export type Block = z.infer<typeof blockSchema>;
 
 export const flatSchema = z.object({
-  id: z.string().uuid(),
-  blockId: z.string().uuid(),
+  id: z.coerce.number().int().positive(),
+  blockId: z.coerce.number().int().positive(),
   number: z.string().min(1).max(20),
 });
 
 export type Flat = z.infer<typeof flatSchema>;
 
 export const createApartmentSchema = z.object({
-  communityId: z.string().uuid().optional(),
+  communityId: z.coerce.number().int().positive().optional(),
   communityName: z.string().min(2).max(160).optional(),
   name: z.string().min(2).max(160),
   city: z.string().min(2).max(80),

@@ -1,50 +1,97 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { isTankerSuperAdmin } from "../auth/types";
 import { AppHeader } from "./AppHeader";
 
 const ROLE_LABEL: Record<string, string> = {
+  parking_super_admin: "Parking super admin",
+  tanker_super_admin: "Tanker super admin",
   super_admin: "Super admin",
   verification_manager: "Verification manager",
   field_executive: "Field executive",
 };
 
-const staffLinks = [
+type StaffNavLink = {
+  to: string;
+  label: string;
+  end?: boolean;
+  roles: string[];
+};
+
+const parkingSuperRoles = ["parking_super_admin", "super_admin"];
+
+const parkingOpsLinks: StaffNavLink[] = [
   {
     to: "/staff",
     label: "Dashboard",
     end: true,
-    roles: ["super_admin", "verification_manager", "field_executive"],
+    roles: [...parkingSuperRoles, "verification_manager", "field_executive"],
   },
-  { to: "/staff/listings", label: "Owners", roles: ["super_admin", "verification_manager"] },
+  {
+    to: "/staff/listings",
+    label: "Owners",
+    roles: [...parkingSuperRoles, "verification_manager"],
+  },
   {
     to: "/staff/verification",
     label: "Verification",
-    roles: ["super_admin", "verification_manager", "field_executive"],
+    roles: [...parkingSuperRoles, "verification_manager", "field_executive"],
   },
-  { to: "/staff/bookings", label: "Bookings", roles: ["super_admin", "verification_manager"] },
-  { to: "/staff/users", label: "Users & staff", roles: ["super_admin"] },
-  { to: "/staff/settings", label: "Commission", roles: ["super_admin"] },
-  { to: "/staff/parking", label: "Legacy slots", roles: ["super_admin"] },
+  {
+    to: "/staff/reportees",
+    label: "My reportees",
+    roles: ["verification_manager"],
+  },
+  {
+    to: "/staff/bookings",
+    label: "Bookings",
+    roles: [...parkingSuperRoles, "verification_manager"],
+  },
+  { to: "/staff/users/parking", label: "Parking users", roles: parkingSuperRoles },
+  { to: "/staff/settings", label: "Commission", roles: parkingSuperRoles },
+  { to: "/staff/parking", label: "Legacy slots", roles: parkingSuperRoles },
 ];
 
+const tankerOpsLinks: StaffNavLink[] = [
+  { to: "/staff/tanker", label: "Water tanker", roles: ["tanker_super_admin"] },
+  { to: "/staff/users/tanker", label: "Tanker users", roles: ["tanker_super_admin"] },
+];
+
+const staffOnlyLinks: StaffNavLink[] = [
+  { to: "/staff/users", label: "Staff users", end: true, roles: parkingSuperRoles },
+];
+
+function filterParkingLinks(links: StaffNavLink[], roles: string[]) {
+  return links.filter((l) => l.roles.some((r) => roles.includes(r)));
+}
+
+function filterTankerLinks(links: StaffNavLink[], roles: string[]) {
+  return links.filter(
+    (l) => isTankerSuperAdmin({ roles }) || l.roles.some((r) => roles.includes(r)),
+  );
+}
+
 export function StaffLayout() {
-  const { user, logout, intent } = useAuth();
+  const { user, logout, intent, module } = useAuth();
   const navigate = useNavigate();
   const roles = user?.roles ?? [];
+  const staffModule = module === "tanker" ? "tanker" : "parking";
 
-  const links = staffLinks.filter(
-    (l) => roles.includes("super_admin") || l.roles.some((r) => roles.includes(r)),
-  );
+  const parkingLinks = staffModule === "parking" ? filterParkingLinks(parkingOpsLinks, roles) : [];
+  const tankerLinks = staffModule === "tanker" ? filterTankerLinks(tankerOpsLinks, roles) : [];
+  const adminLinks = staffModule === "parking" ? filterParkingLinks(staffOnlyLinks, roles) : [];
 
   function onLogout() {
     logout();
-    navigate("/staff/login");
+    navigate(`/staff/login/${staffModule}`);
   }
 
   const roleLabel =
     ROLE_LABEL[intent ?? ""] ||
     ROLE_LABEL[roles.find((r) => ROLE_LABEL[r]) ?? ""] ||
     "Staff";
+
+  const brandKicker = staffModule === "tanker" ? "Tanker staff" : "Parking staff";
 
   return (
     <div className="app-shell">
@@ -54,22 +101,51 @@ export function StaffLayout() {
             P
           </div>
           <div>
-            <p className="brand-kicker">Staff</p>
+            <p className="brand-kicker">{brandKicker}</p>
             <h1>Paashupatastra</h1>
           </div>
         </div>
         <nav className="nav" aria-label="Staff">
-          {links.map((link) => (
-            <NavLink key={link.to} to={link.to} end={link.end}>
-              <span>{link.label}</span>
-            </NavLink>
-          ))}
+          {parkingLinks.length > 0 ? (
+            <>
+              <p className="nav-section-label">Parking ops</p>
+              {parkingLinks.map((link) => (
+                <NavLink key={link.to} to={link.to} end={link.end}>
+                  <span>{link.label}</span>
+                </NavLink>
+              ))}
+            </>
+          ) : null}
+          {tankerLinks.length > 0 ? (
+            <>
+              <p className="nav-section-label">Tanker ops</p>
+              {tankerLinks.map((link) => (
+                <NavLink key={link.to} to={link.to} end={link.end}>
+                  <span>{link.label}</span>
+                </NavLink>
+              ))}
+            </>
+          ) : null}
+          {adminLinks.length > 0 ? (
+            <>
+              <p className="nav-section-label">Administration</p>
+              {adminLinks.map((link) => (
+                <NavLink key={link.to} to={link.to} end={link.end}>
+                  <span>{link.label}</span>
+                </NavLink>
+              ))}
+            </>
+          ) : null}
         </nav>
-        <p className="sidebar-foot">Verify listings, manage bookings, and keep the marketplace healthy.</p>
+        <p className="sidebar-foot">
+          {staffModule === "tanker"
+            ? "Manage tanker suppliers, drivers, and deliveries."
+            : "Verify listings, manage bookings, and keep the marketplace healthy."}
+        </p>
       </aside>
       <div className="shell-body">
         <AppHeader
-          portalLabel="Staff console"
+          portalLabel={staffModule === "tanker" ? "Tanker staff console" : "Parking staff console"}
           userName={user?.name}
           userPhone={user?.phone}
           roleLabel={roleLabel}

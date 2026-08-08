@@ -8,19 +8,19 @@ import {
 
 @Entity({ name: "verification_reports" })
 export class VerificationReportEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "assignment_id", type: "uuid" })
-  assignmentId!: string;
+  @Column({ name: "assignment_id", type: "int" })
+  assignmentId!: number;
 
   @Index()
-  @Column({ name: "listing_id", type: "uuid" })
-  listingId!: string;
+  @Column({ name: "listing_id", type: "int" })
+  listingId!: number;
 
-  @Column({ name: "executive_user_id", type: "uuid" })
-  executiveUserId!: string;
+  @Column({ name: "executive_user_id", type: "int" })
+  executiveUserId!: number;
 
   @Column({ type: "varchar", length: 32 })
   decision!: string;

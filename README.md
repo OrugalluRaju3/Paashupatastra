@@ -66,6 +66,19 @@ All apartments, parking slots, bookings, users, and OTPs are stored in Postgres 
 
 Admin pages: Dashboard, Owner listings, Verification, Users & staff, Commission, Bookings.
 
+### Water tanker V1 (ported into monorepo)
+Source concepts from [Tanker_Backend](https://github.com/OrugalluRaju3/Tanker_Backend) + [Tanker_Web](https://github.com/OrugalluRaju3/Tanker_Web), rewritten for this boilerplate (Fastify + Postgres/TypeORM + React admin — not Express/Angular).
+
+**Service:** `services/tanker` on `:3007` → gateway `/v1/tanker`
+
+**Core flows implemented:**
+1. Supplier OTP signup (`intent=supplier`) → create supplier profile → add tankers/drivers
+2. Customer requests water / browses nearby online suppliers
+3. Supplier accept/reject request → order + delivery OTP
+4. Order status updates through delivery; staff console lists suppliers/vehicles/orders
+
+**Still to port from old tanker apps (next iterations):** invoices PDF, promo codes, tax settings UI, Cashfree checkout for tanker orders, live socket driver tracking, S3 image uploads (use existing `/users/uploads` for now), Angular-only screens not yet mirrored 1:1.
+
 ### Database
 - Connection: `DATABASE_URL` in `.env`
 - Dev schema sync: `TYPEORM_SYNC=true`

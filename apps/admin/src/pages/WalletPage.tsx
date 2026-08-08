@@ -10,6 +10,7 @@ type Wallet = {
   id: string;
   type: string;
   balanceInPaise: number;
+  pendingSettlementInPaise?: number;
   currency: string;
   updatedAt?: string;
 };
@@ -170,7 +171,7 @@ export function WalletPage() {
           <h2>{isOwner ? "Owner wallet" : "My wallet"}</h2>
           <p>
             {isOwner
-              ? "Settlement payouts after customer check-out. Withdraw available balance to your bank account."
+              ? "Available balance is only credited after customer check-out (minus platform fee). Until then, payment stays in the admin/platform wallet."
               : "Payments you made for parking bookings. Funds are held in the platform wallet until check-out."}
           </p>
         </div>
@@ -183,8 +184,21 @@ export function WalletPage() {
         <KpiCard
           label="Available balance"
           value={wallet ? formatInrFromPaise(wallet.balanceInPaise) : "—"}
-          hint={wallet ? `${wallet.type} wallet · ${wallet.currency}` : undefined}
+          hint={
+            isOwner
+              ? "Withdrawable after check-out settlements"
+              : wallet
+                ? `${wallet.type} wallet · ${wallet.currency}`
+                : undefined
+          }
         />
+        {isOwner ? (
+          <KpiCard
+            label="Pending (in admin wallet)"
+            value={wallet ? formatInrFromPaise(wallet.pendingSettlementInPaise ?? 0) : "—"}
+            hint="Paid bookings not yet checked out"
+          />
+        ) : null}
         <KpiCard label="Transactions" value={total} hint="All ledger entries" />
       </div>
 

@@ -7,6 +7,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/v1": "http://localhost:3000",
+      "/tanker-socket": {
+        target: "http://localhost:3007",
+        changeOrigin: true,
+        ws: true,
+        rewrite: (path) => path.replace(/^\/tanker-socket/, ""),
+      },
     },
   },
 });

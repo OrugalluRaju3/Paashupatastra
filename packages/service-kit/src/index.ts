@@ -24,6 +24,7 @@ export type CreateServiceOptions = {
   port: number;
   host?: string;
   registerRoutes: (app: FastifyInstance) => Promise<void> | void;
+  afterReady?: (app: FastifyInstance) => Promise<void> | void;
 };
 
 export async function createService(options: CreateServiceOptions): Promise<FastifyInstance> {
@@ -45,6 +46,11 @@ export async function createService(options: CreateServiceOptions): Promise<Fast
   }));
 
   await options.registerRoutes(app);
+
+  await app.ready();
+  if (options.afterReady) {
+    await options.afterReady(app);
+  }
 
   await app.listen({
     port: options.port,
@@ -78,8 +84,28 @@ export function getUserIdFromHeaders(headers: Record<string, unknown>): string |
   try {
     const token = auth.slice("Bearer ".length);
     const json = Buffer.from(token, "base64url").toString("utf8");
-    const payload = JSON.parse(json) as { sub?: string };
-    return payload.sub ?? null;
+    const payload = JSON.parse(json) as { sub?: string | number };
+    if (payload.sub === undefined || payload.sub === null) return null;
+    return String(payload.sub);
+  } catch {
+    return null;
+  }
+}
+
+/** Parse route/header/JWT id strings into numeric entity ids. */
+export function parseEntityId(value: string | number): number {
+  const n = typeof value === "number" ? value : Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`Invalid entity id: ${value}`);
+  }
+  return n;
+}
+
+export function parseUserIdFromHeaders(headers: Record<string, unknown>): number | null {
+  const raw = getUserIdFromHeaders(headers);
+  if (!raw) return null;
+  try {
+    return parseEntityId(raw);
   } catch {
     return null;
   }

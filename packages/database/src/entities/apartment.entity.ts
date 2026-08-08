@@ -9,8 +9,8 @@ import {
 
 @Entity({ name: "apartments" })
 export class ApartmentEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Column({ type: "varchar", length: 160 })
   name!: string;

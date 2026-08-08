@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { api, formatInrFromPaise, qs } from "../api";
 import { FileUploadField } from "../components/FileUploadField";
+import { GeoCoordFields } from "../components/GeoCoordFields";
 import { KpiCard } from "../components/KpiCard";
 import { Modal } from "../components/Modal";
 import { Pagination } from "../components/Pagination";
@@ -28,6 +29,11 @@ type Listing = {
   ownerName?: string | null;
   ownerPhone?: string | null;
   ownerEmail?: string | null;
+  rejectionReason?: string | null;
+  rejectedByName?: string | null;
+  rejectedByPhone?: string | null;
+  rejectedByRole?: string | null;
+  rejectedAt?: string | null;
   createdAt?: string;
 };
 
@@ -52,6 +58,7 @@ type Stats = {
   fieldInProgress: number;
   managerReview: number;
   approved: number;
+  rejected?: number;
 };
 
 const emptyDocs = {
@@ -255,6 +262,7 @@ export function ListingsPage() {
           <KpiCard label="Pending" value={stats?.pendingVerification ?? "-"} />
           <KpiCard label="Field" value={stats?.fieldInProgress ?? "-"} />
           <KpiCard label="Approved" value={stats?.approved ?? "-"} />
+          <KpiCard label="Rejected" value={stats?.rejected ?? "-"} />
         </div>
       ) : null}
 
@@ -493,24 +501,16 @@ export function ListingsPage() {
                 onChange={(e) => setParkingForm({ ...parkingForm, addressLine: e.target.value })}
               />
             </div>
-            <div className="grid-2">
-              <div className="field">
-                <label>Latitude</label>
-                <input
-                  required
-                  value={parkingForm.latitude}
-                  onChange={(e) => setParkingForm({ ...parkingForm, latitude: e.target.value })}
-                />
-              </div>
-              <div className="field">
-                <label>Longitude</label>
-                <input
-                  required
-                  value={parkingForm.longitude}
-                  onChange={(e) => setParkingForm({ ...parkingForm, longitude: e.target.value })}
-                />
-              </div>
-            </div>
+            <GeoCoordFields
+              idPrefix="listing"
+              active={modalOpen}
+              required
+              latitude={parkingForm.latitude}
+              longitude={parkingForm.longitude}
+              onChange={({ latitude, longitude }) =>
+                setParkingForm((f) => ({ ...f, latitude, longitude }))
+              }
+            />
             <div className="grid-2">
               <div className="field">
                 <label>Rent (INR)</label>
@@ -668,6 +668,24 @@ export function ListingsPage() {
                 Status: {listing.status}
               </p>
             </div>
+            {listing.status === "rejected" ? (
+              <div>
+                <strong>Rejection details</strong>
+                <p>
+                  Reason: {listing.rejectionReason ?? "—"}
+                  <br />
+                  Rejected by:{" "}
+                  {listing.rejectedByName ?? "—"}
+                  {listing.rejectedByRole
+                    ? ` (${listing.rejectedByRole.replaceAll("_", " ")})`
+                    : ""}
+                  {listing.rejectedByPhone ? ` · ${listing.rejectedByPhone}` : ""}
+                  <br />
+                  Rejected at:{" "}
+                  {listing.rejectedAt ? new Date(listing.rejectedAt).toLocaleString() : "—"}
+                </p>
+              </div>
+            ) : null}
             <div>
               <strong>Documents</strong>
               <p>{detail?.documents?.length ?? 0} uploaded</p>

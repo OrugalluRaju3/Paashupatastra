@@ -9,16 +9,16 @@ import {
 
 @Entity({ name: "user_documents" })
 export class UserDocumentEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "user_id", type: "uuid" })
-  userId!: string;
+  @Column({ name: "user_id", type: "int" })
+  userId!: number;
 
   @Index()
-  @Column({ name: "listing_id", type: "uuid", nullable: true })
-  listingId!: string | null;
+  @Column({ name: "listing_id", type: "int", nullable: true })
+  listingId!: number | null;
 
   @Column({ type: "varchar", length: 64 })
   type!: string;

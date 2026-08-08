@@ -9,12 +9,12 @@ import {
 
 @Entity({ name: "wallets" })
 export class WalletEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index({ unique: true })
-  @Column({ name: "user_id", type: "uuid" })
-  userId!: string;
+  @Column({ name: "user_id", type: "int" })
+  userId!: number;
 
   /** platform | owner | customer */
   @Column({ type: "varchar", length: 20, default: "owner" })

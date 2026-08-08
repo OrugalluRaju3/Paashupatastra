@@ -1,5 +1,5 @@
 import "reflect-metadata";
-import { createService, envInt, loadEnv } from "@paashupatastra/service-kit";
+import { createService, envInt, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import {
   ApartmentEntity,
   getDataSource,
@@ -89,7 +89,7 @@ async function main() {
       });
 
       app.get("/v1/apartments/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const row = await repo.findOne({ where: { id } });
         if (!row) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Apartment not found" } });
@@ -114,7 +114,7 @@ async function main() {
       });
 
       app.patch("/v1/apartments/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const existing = await repo.findOne({ where: { id } });
         if (!existing) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Apartment not found" } });
@@ -126,7 +126,7 @@ async function main() {
       });
 
       app.delete("/v1/apartments/:id", async (request, reply) => {
-        const { id } = request.params as { id: string };
+        const id = parseEntityId((request.params as { id: string }).id);
         const result = await repo.delete({ id });
         if (!result.affected) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Apartment not found" } });

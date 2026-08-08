@@ -71,21 +71,21 @@ export function FileUploadField({
               Remove
             </button>
           ) : null}
-        </div>
-        <div className={`file-upload-status${value ? " is-ready" : ""}`}>
-          {uploading ? (
-            "Uploading…"
-          ) : value ? (
-            <>
-              <span>{fileName || "File uploaded"}</span>
-              {" · "}
-              <a href={value} target="_blank" rel="noreferrer">
-                View
-              </a>
-            </>
-          ) : (
-            "No file chosen"
-          )}
+          {uploading || value ? (
+            <div className={`file-upload-status${value && !uploading ? " is-ready" : ""}`}>
+              {uploading ? (
+                "Uploading…"
+              ) : (
+                <>
+                  <span>{fileName || "File uploaded"}</span>
+                  {" · "}
+                  <a href={value} target="_blank" rel="noreferrer">
+                    View
+                  </a>
+                </>
+              )}
+            </div>
+          ) : null}
         </div>
         {hint ? <p className="file-upload-hint">{hint}</p> : null}
       </div>

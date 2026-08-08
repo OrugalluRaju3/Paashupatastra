@@ -9,8 +9,13 @@ import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
+function shortId(id: string | number | null | undefined): string {
+  if (id == null) return "—";
+  return String(id);
+}
+
 type Listing = {
-  id: string;
+  id: string | number;
   apartmentName: string;
   city: string;
   pinCode?: string;
@@ -18,12 +23,17 @@ type Listing = {
   parkingSlotNumber: string;
   ownerName?: string | null;
   ownerPhone?: string | null;
+  rejectionReason?: string | null;
+  rejectedByName?: string | null;
+  rejectedByPhone?: string | null;
+  rejectedByRole?: string | null;
+  rejectedAt?: string | null;
 };
 
 type Assignment = {
-  id: string;
-  listingId: string;
-  executiveUserId: string;
+  id: string | number;
+  listingId: string | number;
+  executiveUserId: string | number;
   status: string;
   dueAt: string | null;
   apartmentName?: string | null;
@@ -34,7 +44,7 @@ type Assignment = {
   executivePhone?: string | null;
 };
 
-type User = { id: string; name: string | null; phone: string; roles: string[] };
+type User = { id: string | number; name: string | null; phone: string; roles: string[] };
 
 type Paginated<T> = {
   items: T[];
@@ -48,15 +58,23 @@ type Stats = {
   pendingVerification: number;
   fieldInProgress: number;
   managerReview: number;
+  needsInfo?: number;
+  rejected?: number;
 };
 
-type TabId = "pending" | "assignments" | "manager";
+type TabId = "pending" | "assignments" | "manager" | "needs_info" | "rejected";
 
 export function VerificationPage() {
   const toast = useToast();
   const { user } = useAuth();
-  const canManageReview = hasAnyRole(user, ["super_admin", "verification_manager"]);
-  const [tab, setTab] = useState<TabId>("pending");
+  const canManageReview = hasAnyRole(user, [
+    "parking_super_admin",
+    "super_admin",
+    "verification_manager",
+  ]);
+  const isFieldExecutiveOnly =
+    hasAnyRole(user, ["field_executive"]) && !canManageReview;
+  const [tab, setTab] = useState<TabId>(isFieldExecutiveOnly ? "assignments" : "pending");
   const [stats, setStats] = useState<Stats | null>(null);
   const [listings, setListings] = useState<Paginated<Listing> | null>(null);
   const [assignments, setAssignments] = useState<Paginated<Assignment> | null>(null);
@@ -69,7 +87,7 @@ export function VerificationPage() {
   const [reportAssignmentId, setReportAssignmentId] = useState("");
   const [fieldPhotoUrl, setFieldPhotoUrl] = useState("");
   const [managerListingId, setManagerListingId] = useState("");
-  const [comments, setComments] = useState("Verified on site. Documents match.");
+  const [comments, setComments] = useState("");
 
   useEffect(() => {
     setPage(1);
@@ -85,7 +103,7 @@ export function VerificationPage() {
       await loadCounts();
       const execs = await api.get<Paginated<User>>(`/users${qs({ role: "field_executive", limit: 50 })}`);
       setExecutives(execs.items);
-      if (!executiveId && execs.items[0]) setExecutiveId(execs.items[0].id);
+      if (!executiveId && execs.items[0]) setExecutiveId(String(execs.items[0].id));
 
       if (tab === "pending") {
         const p = await api.get<Paginated<Listing>>(
@@ -98,6 +116,18 @@ export function VerificationPage() {
           `/parking/listings${qs({ status: "manager_review", page, limit: 10, q: search })}`,
         );
         setListings(m);
+        setAssignments(null);
+      } else if (tab === "needs_info") {
+        const n = await api.get<Paginated<Listing>>(
+          `/parking/listings${qs({ status: "needs_info", page, limit: 10, q: search })}`,
+        );
+        setListings(n);
+        setAssignments(null);
+      } else if (tab === "rejected") {
+        const r = await api.get<Paginated<Listing>>(
+          `/parking/listings${qs({ status: "rejected", page, limit: 10, q: search })}`,
+        );
+        setListings(r);
         setAssignments(null);
       } else {
         const a = await api.get<Paginated<Assignment>>(
@@ -138,19 +168,29 @@ export function VerificationPage() {
 
   function openFieldReport(assignmentId: string) {
     setFieldPhotoUrl("");
+    setComments("");
     setReportAssignmentId(assignmentId);
   }
 
-  async function submitFieldReport(decision: "approve" | "reject" | "need_info") {
+  async function submitFieldReport(decision: "approve" | "reject") {
     if (!fieldPhotoUrl) {
       toast.error("Upload at least one field verification photo");
+      return;
+    }
+    const reason = comments.trim();
+    if (decision === "reject" && reason.length < 10) {
+      toast.error("Rejection reason is required (at least 10 characters)");
+      return;
+    }
+    if (decision === "approve" && reason.length < 5) {
+      toast.error("Comments are required (at least 5 characters)");
       return;
     }
     try {
       await api.post("/parking/verification/field-report", {
         assignmentId: reportAssignmentId,
         decision,
-        comments,
+        comments: reason,
         photoUrls: [fieldPhotoUrl],
         addressVerified: true,
         ownershipVerified: true,
@@ -160,12 +200,9 @@ export function VerificationPage() {
       });
       setReportAssignmentId("");
       setFieldPhotoUrl("");
+      setComments("");
       toast.success(
-        decision === "approve"
-          ? "Field report sent to manager"
-          : decision === "reject"
-            ? "Listing rejected"
-            : "Marked as needs info",
+        decision === "approve" ? "Field report sent to manager" : "Request rejected",
       );
       await loadTab();
     } catch (err) {
@@ -173,24 +210,36 @@ export function VerificationPage() {
     }
   }
 
-  async function managerDecide(decision: "approve" | "reject" | "send_back") {
+  async function managerDecide(decision: "approve" | "reject" | "send_back" | "need_info") {
     if (!canManageReview) {
       toast.error("Only verification managers can approve or reject listings");
+      return;
+    }
+    const reason = comments.trim();
+    if (decision === "reject" && reason.length < 10) {
+      toast.error("Rejection reason is required (at least 10 characters)");
+      return;
+    }
+    if (reason.length < 3) {
+      toast.error("Comments are required");
       return;
     }
     try {
       await api.post("/parking/verification/manager-decision", {
         listingId: managerListingId,
         decision,
-        comments,
+        comments: reason,
       });
       setManagerListingId("");
+      setComments("");
       toast.success(
         decision === "approve"
-          ? "Listing approved and activated"
+          ? "Request approved and activated"
           : decision === "reject"
-            ? "Listing rejected"
-            : "Sent back for re-verification",
+            ? "Request rejected"
+            : decision === "need_info"
+              ? "Marked as needs more info"
+              : "Sent back for re-verification",
       );
       await loadTab();
     } catch (err) {
@@ -199,9 +248,27 @@ export function VerificationPage() {
   }
 
   const tabs: Array<{ id: TabId; label: string; count: number }> = [
-    { id: "pending", label: "Pending verification", count: stats?.pendingVerification ?? 0 },
-    { id: "assignments", label: "Field assignments", count: stats?.fieldInProgress ?? assignments?.total ?? 0 },
-    { id: "manager", label: "Manager review", count: stats?.managerReview ?? 0 },
+    ...(canManageReview
+      ? [
+          {
+            id: "pending" as const,
+            label: "Pending verification",
+            count: stats?.pendingVerification ?? 0,
+          },
+        ]
+      : []),
+    {
+      id: "assignments",
+      label: "Field assignments",
+      count: stats?.fieldInProgress ?? assignments?.total ?? 0,
+    },
+    { id: "rejected", label: "Rejected", count: stats?.rejected ?? 0 },
+    ...(canManageReview
+      ? [
+          { id: "needs_info" as const, label: "Needs info", count: stats?.needsInfo ?? 0 },
+          { id: "manager" as const, label: "Manager review", count: stats?.managerReview ?? 0 },
+        ]
+      : []),
   ];
 
   return (
@@ -248,7 +315,7 @@ export function VerificationPage() {
           </div>
         </div>
 
-        {tab === "pending" || tab === "manager" ? (
+        {tab === "pending" || tab === "manager" || tab === "needs_info" || tab === "rejected" ? (
           <>
             <div className="table-wrap">
               <table className="data">
@@ -257,18 +324,24 @@ export function VerificationPage() {
                     <th>Listing</th>
                     <th>Owner</th>
                     <th>Status</th>
+                    {tab === "rejected" ? <th>Rejected by</th> : null}
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(listings?.items ?? []).map((item) => (
-                    <tr key={item.id}>
+                    <tr key={String(item.id)}>
                       <td>
                         <strong>{item.apartmentName}</strong> · {item.parkingSlotNumber}
                         <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
                           {item.city}
                           {item.pinCode ? ` · ${item.pinCode}` : ""}
                         </div>
+                        {tab === "rejected" && item.rejectionReason ? (
+                          <div style={{ color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                            Reason: {item.rejectionReason}
+                          </div>
+                        ) : null}
                       </td>
                       <td>
                         <strong>{item.ownerName ?? "—"}</strong>
@@ -278,28 +351,49 @@ export function VerificationPage() {
                       </td>
                       <td>
                         <StatusBadge status={item.status} />
+                        {tab === "rejected" && item.rejectedAt ? (
+                          <div style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                            {new Date(item.rejectedAt).toLocaleString()}
+                          </div>
+                        ) : null}
                       </td>
+                      {tab === "rejected" ? (
+                        <td>
+                          <strong>{item.rejectedByName ?? "—"}</strong>
+                          <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                            {(item.rejectedByRole ?? "staff").replaceAll("_", " ")}
+                            {item.rejectedByPhone ? ` · ${item.rejectedByPhone}` : ""}
+                          </div>
+                        </td>
+                      ) : null}
                       <td>
                         {tab === "pending" ? (
                           canManageReview ? (
                             <button
                               type="button"
                               className="btn btn-primary btn-sm"
-                              onClick={() => setAssignListingId(item.id)}
+                              onClick={() => setAssignListingId(String(item.id))}
                             >
                               Assign executive
                             </button>
                           ) : (
                             <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>View only</span>
                           )
+                        ) : tab === "rejected" ? (
+                          <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                            Owner may re-apply
+                          </span>
                         ) : canManageReview ? (
-                          <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            onClick={() => setManagerListingId(item.id)}
-                          >
-                            Decide
-                          </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setComments("");
+                  setManagerListingId(String(item.id));
+                }}
+              >
+                {tab === "needs_info" ? "Follow up" : "Decide"}
+              </button>
                         ) : (
                           <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
                             Manager only
@@ -310,7 +404,7 @@ export function VerificationPage() {
                   ))}
                   {listings && listings.items.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="empty">
+                      <td colSpan={tab === "rejected" ? 5 : 4} className="empty">
                         No requests in this queue.
                       </td>
                     </tr>
@@ -342,10 +436,10 @@ export function VerificationPage() {
                 </thead>
                 <tbody>
                   {(assignments?.items ?? []).map((a) => (
-                    <tr key={a.id}>
-                      <td className="mono">{a.id.slice(0, 8)}…</td>
+                    <tr key={String(a.id)}>
+                      <td className="mono">#{shortId(a.id)}</td>
                       <td>
-                        <strong>{a.apartmentName ?? a.listingId.slice(0, 8)}</strong>
+                        <strong>{a.apartmentName ?? `Listing #${shortId(a.listingId)}`}</strong>
                         {a.parkingSlotNumber ? ` · ${a.parkingSlotNumber}` : ""}
                         <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
                           {a.city ?? "—"}
@@ -355,27 +449,47 @@ export function VerificationPage() {
                       <td>
                         <strong>{a.executiveName ?? "—"}</strong>
                         <div className="mono" style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
-                          {a.executivePhone ?? a.executiveUserId.slice(0, 8)}
+                          {a.executivePhone ?? `User #${shortId(a.executiveUserId)}`}
                         </div>
                       </td>
                       <td>
                         <StatusBadge status={a.status} />
+                        {a.listingStatus ? (
+                          <div style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                            Listing: {a.listingStatus.replaceAll("_", " ")}
+                          </div>
+                        ) : null}
                       </td>
                       <td>
-                        {a.status !== "completed" ? (
+                        {a.status === "assigned" || a.status === "in_progress" ? (
                           <button
                             type="button"
                             className="btn btn-ghost btn-sm"
-                            onClick={() => openFieldReport(a.id)}
+                            onClick={() => openFieldReport(String(a.id))}
                           >
                             Submit field report
                           </button>
+                        ) : a.status === "needs_info" ? (
+                          <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Needs info</span>
+                        ) : a.status === "rejected" ? (
+                          <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Rejected</span>
+                        ) : a.status === "completed" ? (
+                          <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                            Sent to manager
+                          </span>
                         ) : (
                           "—"
                         )}
                       </td>
                     </tr>
                   ))}
+                  {!assignments ? (
+                    <tr>
+                      <td colSpan={5} className="empty">
+                        Loading field assignments…
+                      </td>
+                    </tr>
+                  ) : null}
                   {assignments && assignments.items.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="empty">
@@ -419,7 +533,7 @@ export function VerificationPage() {
               <select value={executiveId} onChange={(e) => setExecutiveId(e.target.value)} required>
                 <option value="">Select executive</option>
                 {executives.map((u) => (
-                  <option key={u.id} value={u.id}>
+                  <option key={String(u.id)} value={String(u.id)}>
                     {u.name ?? u.phone} ({u.phone})
                   </option>
                 ))}
@@ -444,9 +558,6 @@ export function VerificationPage() {
               <button type="button" className="btn btn-danger" onClick={() => void submitFieldReport("reject")}>
                 Reject
               </button>
-              <button type="button" className="btn btn-ghost" onClick={() => void submitFieldReport("need_info")}>
-                Need info
-              </button>
               <button type="button" className="btn btn-primary" onClick={() => void submitFieldReport("approve")}>
                 Send to manager
               </button>
@@ -461,15 +572,25 @@ export function VerificationPage() {
             hint="Upload a photo from the field visit"
           />
           <div className="field">
-            <label>Comments</label>
-            <textarea value={comments} onChange={(e) => setComments(e.target.value)} />
+            <label htmlFor="field-report-comments">
+              Comments / rejection reason <span style={{ color: "var(--danger, #b42318)" }}>*</span>
+            </label>
+            <textarea
+              id="field-report-comments"
+              required
+              minLength={5}
+              placeholder="Required. For reject, explain the reason (min 10 characters)."
+              value={comments}
+              onChange={(e) => setComments(e.target.value)}
+            />
+            <p className="auth-hint">Rejection reason is mandatory and is emailed to owner, manager, and admin.</p>
           </div>
         </Modal>
       ) : null}
 
       {managerListingId && canManageReview ? (
         <Modal
-          title="Manager final decision"
+          title="Manager decision"
           onClose={() => setManagerListingId("")}
           footer={
             <>
@@ -479,19 +600,49 @@ export function VerificationPage() {
               <button type="button" className="btn btn-danger" onClick={() => void managerDecide("reject")}>
                 Reject
               </button>
+              {tab === "manager" ? (
+                <button type="button" className="btn btn-ghost" onClick={() => void managerDecide("need_info")}>
+                  Need more info
+                </button>
+              ) : null}
               <button type="button" className="btn btn-ghost" onClick={() => void managerDecide("send_back")}>
                 Re-verify
               </button>
-              <button type="button" className="btn btn-primary" onClick={() => void managerDecide("approve")}>
-                Approve & activate
-              </button>
+              {tab === "manager" ? (
+                <button type="button" className="btn btn-primary" onClick={() => void managerDecide("approve")}>
+                  Approve & activate
+                </button>
+              ) : null}
             </>
           }
         >
           <div className="field">
-            <label>Comments / notification note</label>
-            <textarea value={comments} onChange={(e) => setComments(e.target.value)} />
+            <label htmlFor="manager-decision-comments">
+              Comments / rejection reason <span style={{ color: "var(--danger, #b42318)" }}>*</span>
+            </label>
+            <textarea
+              id="manager-decision-comments"
+              required
+              minLength={3}
+              placeholder="Required. For reject, explain the reason (min 10 characters)."
+              value={comments}
+              onChange={(e) => setComments(e.target.value)}
+            />
+            <p className="auth-hint">
+              On reject, this reason and rejection time are sent to owner, executive, manager, and admin.
+            </p>
           </div>
+          {tab === "needs_info" ? (
+            <p className="auth-hint">
+              Needs-info is set by managers/admins only. Reject the listing, or re-verify after the owner updates
+              documents. Approve is only available from Manager review.
+            </p>
+          ) : (
+            <p className="auth-hint">
+              Use Need more info to ask the owner for documents/details. Use Re-verify to send the listing back to
+              the field executive.
+            </p>
+          )}
         </Modal>
       ) : null}
     </>

@@ -9,8 +9,8 @@ import {
 
 @Entity({ name: "users" })
 export class UserEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index({ unique: true })
   @Column({ type: "varchar", length: 10 })
@@ -51,6 +51,20 @@ export class UserEntity {
 
   @Column({ name: "is_active", type: "boolean", default: true })
   isActive!: boolean;
+
+  @Column({ name: "deactivation_reason", type: "text", nullable: true })
+  deactivationReason!: string | null;
+
+  @Column({ name: "deactivated_at", type: "timestamptz", nullable: true })
+  deactivatedAt!: Date | null;
+
+  /** system | admin user id as string */
+  @Column({ name: "deactivated_by", type: "varchar", length: 40, nullable: true })
+  deactivatedBy!: string | null;
+
+  @Index()
+  @Column({ name: "reporting_manager_id", type: "int", nullable: true })
+  reportingManagerId!: number | null;
 
   @CreateDateColumn({ name: "created_at", type: "timestamptz" })
   createdAt!: Date;

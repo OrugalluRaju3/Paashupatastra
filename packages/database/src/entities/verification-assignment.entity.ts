@@ -9,22 +9,22 @@ import {
 
 @Entity({ name: "verification_assignments" })
 export class VerificationAssignmentEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "listing_id", type: "uuid" })
-  listingId!: string;
+  @Column({ name: "listing_id", type: "int" })
+  listingId!: number;
 
   @Index()
-  @Column({ name: "executive_user_id", type: "uuid" })
-  executiveUserId!: string;
+  @Column({ name: "executive_user_id", type: "int" })
+  executiveUserId!: number;
 
-  @Column({ name: "assigned_by_user_id", type: "uuid" })
-  assignedByUserId!: string;
+  @Column({ name: "assigned_by_user_id", type: "int" })
+  assignedByUserId!: number;
 
   @Column({ type: "varchar", length: 32, default: "assigned" })
-  status!: string; // assigned | in_progress | completed | cancelled
+  status!: string; // assigned | in_progress | completed | needs_info | rejected | cancelled
 
   @Column({ name: "due_at", type: "timestamptz", nullable: true })
   dueAt!: Date | null;

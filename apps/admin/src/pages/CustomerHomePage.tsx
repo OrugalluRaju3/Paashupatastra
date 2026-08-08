@@ -31,7 +31,20 @@ export function CustomerHomePage() {
             <li>Search an approved slot and pick check-in / check-out time.</li>
             <li>Pay — amount goes to the platform wallet and the slot is held for you.</li>
             <li>On arrival, get the OTP from the owner and check in.</li>
+            <li>
+              If check-in time has started but you never check in, you get reminders every 5 minutes
+              until check-out time. Then the booking is marked completed and payment goes to the
+              owner.
+            </li>
             <li>You get a reminder 5 minutes before check-out; then check out in the app.</li>
+            <li>
+              If you miss check-out, you and the owner get reminders every 5 minutes.
+            </li>
+            <li>
+              If check-out is overdue by more than 1 hour, both your account and the owner&apos;s
+              account are set inactive (with reason). Login is blocked until a Parking Super Admin
+              reactivates you — you will get email and in-app notifications.
+            </li>
           </ol>
           <p style={{ marginTop: "1rem" }}>
             <strong>Mobile:</strong> {user?.phone}

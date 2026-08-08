@@ -6,7 +6,6 @@ import {
   parkingRentTypeSchema,
   parkingTypeSchema,
   vehicleTypeSchema,
-  verificationDecisionSchema,
 } from "./enums";
 
 export const ownerApplicationSchema = z.object({
@@ -73,17 +72,17 @@ export const ownerApplicationSchema = z.object({
 export type OwnerApplicationInput = z.infer<typeof ownerApplicationSchema>;
 
 export const assignVerificationSchema = z.object({
-  listingId: z.string().uuid(),
-  executiveUserId: z.string().uuid(),
+  listingId: z.coerce.number().int().positive(),
+  executiveUserId: z.coerce.number().int().positive(),
   dueAt: z.string().datetime().optional(),
 });
 
 export type AssignVerificationInput = z.infer<typeof assignVerificationSchema>;
 
 export const fieldVerificationReportSchema = z.object({
-  assignmentId: z.string().uuid(),
-  decision: verificationDecisionSchema,
-  comments: z.string().min(5).max(2000),
+  assignmentId: z.coerce.number().int().positive(),
+  decision: z.enum(["approve", "reject"]),
+  comments: z.string().trim().min(5).max(2000),
   photoUrls: z.array(uploadedFileRefSchema).min(1),
   verifiedLatitude: z.number().optional(),
   verifiedLongitude: z.number().optional(),
@@ -92,14 +91,30 @@ export const fieldVerificationReportSchema = z.object({
   slotVerified: z.boolean(),
   documentsVerified: z.boolean(),
   gpsVerified: z.boolean(),
+}).superRefine((data, ctx) => {
+  if (data.decision === "reject" && data.comments.trim().length < 10) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["comments"],
+      message: "Rejection reason is required (at least 10 characters)",
+    });
+  }
 });
 
 export type FieldVerificationReportInput = z.infer<typeof fieldVerificationReportSchema>;
 
 export const managerDecisionSchema = z.object({
-  listingId: z.string().uuid(),
-  decision: z.enum(["approve", "reject", "send_back"]),
-  comments: z.string().min(3).max(2000),
+  listingId: z.coerce.number().int().positive(),
+  decision: z.enum(["approve", "reject", "send_back", "need_info"]),
+  comments: z.string().trim().min(3).max(2000),
+}).superRefine((data, ctx) => {
+  if (data.decision === "reject" && data.comments.trim().length < 10) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["comments"],
+      message: "Rejection reason is required (at least 10 characters)",
+    });
+  }
 });
 
 export type ManagerDecisionInput = z.infer<typeof managerDecisionSchema>;
@@ -117,7 +132,7 @@ export const customerProfileSchema = z.object({
 export type CustomerProfileInput = z.infer<typeof customerProfileSchema>;
 
 export const publicSignupSchema = customerProfileSchema.extend({
-  intent: z.enum(["customer", "owner"]),
+  intent: z.enum(["customer", "owner", "supplier"]),
 });
 
 export type PublicSignupInput = z.infer<typeof publicSignupSchema>;
@@ -142,7 +157,7 @@ export const parkingSearchSchema = z.object({
 export type ParkingSearchInput = z.infer<typeof parkingSearchSchema>;
 
 export const quoteBookingSchema = z.object({
-  listingId: z.string().uuid(),
+  listingId: z.coerce.number().int().positive(),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
 });
@@ -150,7 +165,7 @@ export const quoteBookingSchema = z.object({
 export type QuoteBookingInput = z.infer<typeof quoteBookingSchema>;
 
 export const createBookingV2Schema = z.object({
-  listingId: z.string().uuid(),
+  listingId: z.coerce.number().int().positive(),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
   vehicleNumber: z.string().min(4).max(20).optional(),
@@ -162,7 +177,7 @@ export type CreateBookingV2Input = z.infer<typeof createBookingV2Schema>;
 export const documentUploadMetaSchema = z.object({
   type: documentTypeSchema,
   fileUrl: uploadedFileRefSchema,
-  listingId: z.string().uuid().optional(),
+  listingId: z.coerce.number().int().positive().optional(),
 });
 
 export type DocumentUploadMeta = z.infer<typeof documentUploadMetaSchema>;

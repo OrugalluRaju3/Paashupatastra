@@ -31,7 +31,20 @@ export function OwnerHomePage() {
             <li>Register parking under My applications and complete verification.</li>
             <li>When a customer pays, you get minimal customer details + a check-in OTP.</li>
             <li>Share the OTP only when they arrive so they can check in.</li>
-            <li>After check-out, payout (minus platform fee) credits your wallet.</li>
+            <li>
+              If a customer never checks in after their start time, they get reminders every 5
+              minutes until check-out time; then the booking auto-completes and payout (minus
+              platform fee) credits your wallet.
+            </li>
+            <li>After normal check-out, payout (minus platform fee) credits your wallet.</li>
+            <li>
+              If a customer misses check-out, you both get reminders every 5 minutes.
+            </li>
+            <li>
+              If check-out is overdue by more than 1 hour, both the customer&apos;s account and your
+              account are set inactive (with reason). Login is blocked until a Parking Super Admin
+              reactivates you — you will get email and in-app notifications.
+            </li>
           </ol>
           <p style={{ marginTop: "1rem" }}>
             <strong>Name:</strong> {user?.name ?? "—"} · <strong>Mobile:</strong> {user?.phone}

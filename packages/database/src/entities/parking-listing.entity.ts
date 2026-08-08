@@ -7,14 +7,14 @@ import {
   UpdateDateColumn,
 } from "typeorm";
 
-@Entity({ name: "parking_listings" })
+@Entity({ name: "parking_requests" })
 export class ParkingListingEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
-  @Column({ name: "owner_user_id", type: "uuid" })
-  ownerUserId!: string;
+  @Column({ name: "owner_user_id", type: "int" })
+  ownerUserId!: number;
 
   @Index()
   @Column({ type: "varchar", length: 40, default: "pending_verification" })
@@ -95,6 +95,15 @@ export class ParkingListingEntity {
 
   @Column({ name: "rejection_reason", type: "text", nullable: true })
   rejectionReason!: string | null;
+
+  @Column({ name: "rejected_by_user_id", type: "int", nullable: true })
+  rejectedByUserId!: number | null;
+
+  @Column({ name: "rejected_by_role", type: "varchar", length: 40, nullable: true })
+  rejectedByRole!: string | null;
+
+  @Column({ name: "rejected_at", type: "timestamptz", nullable: true })
+  rejectedAt!: Date | null;
 
   @Column({ name: "needs_info_notes", type: "text", nullable: true })
   needsInfoNotes!: string | null;

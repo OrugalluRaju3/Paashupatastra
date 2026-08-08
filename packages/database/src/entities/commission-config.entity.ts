@@ -8,8 +8,8 @@ import {
 
 @Entity({ name: "commission_configs" })
 export class CommissionConfigEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Column({ name: "module_name", type: "varchar", length: 40, default: "parking" })
   moduleName!: string;

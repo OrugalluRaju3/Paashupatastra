@@ -70,25 +70,33 @@ function listingAddress(listing: Booking["listing"]) {
 
 export function CustomerBookingsPage() {
   const toast = useToast();
-  const { user } = useAuth();
+  const { token } = useAuth();
   const [items, setItems] = useState<Booking[]>([]);
   const [checkInId, setCheckInId] = useState<string | null>(null);
   const [navBooking, setNavBooking] = useState<Booking | null>(null);
   const [viewBooking, setViewBooking] = useState<Booking | null>(null);
   const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(true);
 
   const load = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      const res = await api.get<{ items: Booking[] }>(
-        `/parking/bookings${qs({ renterUserId: user.id, limit: 50 })}`,
-      );
-      setItems(res.items);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to load bookings");
+    if (!token) {
+      setItems([]);
+      setListLoading(false);
+      return;
     }
-  }, [user?.id, toast]);
+    setListLoading(true);
+    try {
+      // Bound to JWT on the server — do not trust a client-side user id filter
+      const res = await api.get<{ items: Booking[] }>(`/parking/bookings${qs({ limit: 50 })}`);
+      setItems(Array.isArray(res.items) ? res.items : []);
+    } catch (err) {
+      setItems([]);
+      toast.error(err instanceof Error ? err.message : "Failed to load bookings");
+    } finally {
+      setListLoading(false);
+    }
+  }, [token, toast]);
 
   useEffect(() => {
     void load();
@@ -189,8 +197,16 @@ export function CustomerBookingsPage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((b) => (
-                <tr key={b.id}>
+              {listLoading ? (
+                <tr>
+                  <td colSpan={5} className="empty">
+                    Loading your bookings…
+                  </td>
+                </tr>
+              ) : null}
+              {!listLoading &&
+                items.map((b) => (
+                <tr key={String(b.id)}>
                   <td>
                     <strong>{b.listing?.apartmentName ?? "Parking"}</strong>
                     <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
@@ -204,7 +220,7 @@ export function CustomerBookingsPage() {
                       → {new Date(b.endAt).toLocaleString("en-IN")}
                     </div>
                   </td>
-                  <td>{formatInrFromPaise(b.totalAmountInPaise)}</td>
+                  <td>{formatInrFromPaise(b.totalAmountInPaise ?? 0)}</td>
                   <td>
                     <StatusBadge status={b.status} />
                     <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>{b.paymentStatus}</div>
@@ -223,7 +239,7 @@ export function CustomerBookingsPage() {
                           type="button"
                           className="btn btn-primary btn-sm"
                           disabled={loading}
-                          onClick={() => void payPending(b.id)}
+                          onClick={() => void payPending(String(b.id))}
                         >
                           Pay
                         </button>
@@ -243,7 +259,7 @@ export function CustomerBookingsPage() {
                           className="btn btn-primary btn-sm"
                           onClick={() => {
                             setOtp("");
-                            setCheckInId(b.id);
+                            setCheckInId(String(b.id));
                           }}
                         >
                           Enter OTP
@@ -254,7 +270,7 @@ export function CustomerBookingsPage() {
                           type="button"
                           className="btn btn-ghost btn-sm"
                           disabled={loading}
-                          onClick={() => void checkOut(b.id)}
+                          onClick={() => void checkOut(String(b.id))}
                         >
                           Check out
                         </button>
@@ -263,7 +279,7 @@ export function CustomerBookingsPage() {
                   </td>
                 </tr>
               ))}
-              {items.length === 0 ? (
+              {!listLoading && items.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="empty">
                     No bookings yet. Search and select a parking slot to start.

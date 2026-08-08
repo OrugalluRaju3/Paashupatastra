@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, formatInrFromPaise, qs } from "../api";
-import { useAuth } from "../auth/AuthContext";
 import { KpiCard } from "../components/KpiCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
@@ -32,25 +31,30 @@ type Booking = {
 
 export function OwnerBookingsPage() {
   const toast = useToast();
-  const { user } = useAuth();
   const [items, setItems] = useState<Booking[]>([]);
-  const [wallet, setWallet] = useState<{ balanceInPaise: number } | null>(null);
+  const [wallet, setWallet] = useState<{
+    balanceInPaise: number;
+    pendingSettlementInPaise?: number;
+  } | null>(null);
 
   const load = useCallback(async () => {
-    if (!user?.id) return;
     try {
       const [bookings, w] = await Promise.all([
         api.get<{ items: Booking[] }>(
-          `/parking/bookings${qs({ ownerUserId: user.id, limit: 50 })}`,
+          `/parking/bookings${qs({ mine: "owner", limit: 50 })}`,
         ),
-        api.get<{ balanceInPaise: number }>("/payments/wallets/me").catch(() => null),
+        api
+          .get<{ balanceInPaise: number; pendingSettlementInPaise?: number }>(
+            "/payments/wallets/me",
+          )
+          .catch(() => null),
       ]);
-      setItems(bookings.items);
+      setItems(bookings.items ?? []);
       setWallet(w);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load bookings");
     }
-  }, [user?.id, toast]);
+  }, [toast]);
 
   useEffect(() => {
     void load();
@@ -79,9 +83,14 @@ export function OwnerBookingsPage() {
       {wallet ? (
         <div className="kpi-grid">
           <KpiCard
-            label="Owner wallet"
+            label="Available in wallet"
             value={formatInrFromPaise(wallet.balanceInPaise)}
-            hint="Full history under Wallet"
+            hint="Credited after check-out"
+          />
+          <KpiCard
+            label="Pending (admin hold)"
+            value={formatInrFromPaise(wallet.pendingSettlementInPaise ?? 0)}
+            hint="Released after check-out − fee"
           />
         </div>
       ) : null}

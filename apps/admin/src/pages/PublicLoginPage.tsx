@@ -1,9 +1,10 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { useAuth } from "../auth/AuthContext";
-import type { PublicIntent } from "../auth/types";
+import { useAuth, getStoredModule } from "../auth/AuthContext";
+import { publicHomePath, type AuthModule, type PublicIntent } from "../auth/types";
 import { FileUploadField } from "../components/FileUploadField";
+import { GeoCoordFields } from "../components/GeoCoordFields";
 import { useToast } from "../components/Toast";
 
 type Mode = "login" | "signup";
@@ -50,7 +51,65 @@ const emptyOwner = {
   upiId: "",
 };
 
-export function PublicLoginPage() {
+type VehicleEntry = {
+  driverFirstName: string;
+  driverLastName: string;
+  driverEmail: string;
+  driverMobile: string;
+  waterType: string;
+  vehicleNumber: string;
+  capacityLitres: string;
+  amountInr: string;
+  licenceFrontUrl: string;
+  licenceBackUrl: string;
+  tankerImageUrl: string;
+  latitude: string;
+  longitude: string;
+};
+
+const WATER_TYPE_OPTIONS = [
+  "Drinking Water",
+  "Borewell Water",
+  "Mineral Water",
+  "Soft Water",
+  "Raw Water",
+] as const;
+
+const emptyVehicleEntry = (): VehicleEntry => ({
+  driverFirstName: "",
+  driverLastName: "",
+  driverEmail: "",
+  driverMobile: "",
+  waterType: "Drinking Water",
+  vehicleNumber: "",
+  capacityLitres: "",
+  amountInr: "",
+  licenceFrontUrl: "",
+  licenceBackUrl: "",
+  tankerImageUrl: "",
+  latitude: "",
+  longitude: "",
+});
+
+const emptySupplier = {
+  firstName: "",
+  lastName: "",
+  email: "",
+  alternateMobile: "",
+  address: "",
+  landmark: "",
+  city: "",
+  state: "",
+  country: "IN",
+  pinCode: "",
+  availabilityStartTime: "06:00",
+  availabilityEndTime: "22:00",
+  latitude: "",
+  longitude: "",
+  proofUrl: "",
+};
+
+export function PublicLoginPage({ module }: { module: AuthModule }) {
   const toast = useToast();
   const { token, portal, requestOtp, loginPublic, signupPublic } = useAuth();
   const navigate = useNavigate();
@@ -64,14 +123,33 @@ export function PublicLoginPage() {
   const [loading, setLoading] = useState(false);
   const [customer, setCustomer] = useState(emptyCustomer);
   const [owner, setOwner] = useState(emptyOwner);
+  const [supplier, setSupplier] = useState(emptySupplier);
+  const [vehicles, setVehicles] = useState<VehicleEntry[]>([emptyVehicleEntry()]);
+
+  useEffect(() => {
+    if (module === "parking" && (intent === "supplier" || intent === "driver")) {
+      setIntent("customer");
+    }
+    if (module === "tanker" && intent === "owner") {
+      setIntent("customer");
+    }
+  }, [module, intent]);
 
   if (token && portal === "public") {
-    const dest = localStorage.getItem("paash_intent") === "owner" ? "/app/owner" : "/app/customer";
-    return <Navigate to={dest} replace />;
+    const storedModule = getStoredModule() ?? module;
+    return (
+      <Navigate
+        to={publicHomePath(localStorage.getItem("paash_intent"), storedModule)}
+        replace
+      />
+    );
   }
 
   function switchMode(next: Mode) {
     setMode(next);
+    if (next === "signup" && intent === "driver") {
+      setIntent("supplier");
+    }
     setOtpSent(false);
     setOtp("");
     setOtpHint("");
@@ -79,14 +157,48 @@ export function PublicLoginPage() {
   }
 
   function signupEmail() {
-    return intent === "owner" ? owner.email.trim() : customer.email.trim();
+    if (intent === "owner") return owner.email.trim();
+    if (intent === "supplier") return supplier.email.trim();
+    return customer.email.trim();
+  }
+
+  function updateVehicle(index: number, patch: Partial<VehicleEntry>) {
+    setVehicles((prev) => prev.map((v, i) => (i === index ? { ...v, ...patch } : v)));
+  }
+
+  function addVehicle() {
+    setVehicles((prev) => [...prev, emptyVehicleEntry()]);
+  }
+
+  function removeVehicle(index: number) {
+    setVehicles((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== index)));
+  }
+
+  function copySupplierLocationToVehicle(index: number) {
+    updateVehicle(index, {
+      latitude: supplier.latitude,
+      longitude: supplier.longitude,
+    });
+  }
+
+  function intentLabel(value: PublicIntent) {
+    if (value === "owner") return "Owner";
+    if (value === "supplier") return "Water supplier";
+    if (value === "driver") return "Tanker driver";
+    return "Customer";
   }
 
   async function onSendOtp(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await requestOtp(phone, mode === "signup" ? { email: signupEmail() } : undefined);
+      const res = await requestOtp(phone, {
+        email: mode === "signup" ? signupEmail() : undefined,
+        module,
+        purpose: mode === "signup" ? "signup" : "login",
+        portal: "public",
+        intent,
+      });
       setDebugOtp(res.debugOtp);
       setOtp("");
       setOtpHint(res.message ?? "OTP sent");
@@ -104,7 +216,7 @@ export function PublicLoginPage() {
     setLoading(true);
     try {
       if (mode === "signup" && intent === "customer") {
-        await signupPublic(phone, otp, "customer", {
+        await signupPublic(phone, otp, intent, module, {
           fullName: customer.fullName.trim(),
           email: customer.email.trim(),
           city: customer.city.trim(),
@@ -112,8 +224,98 @@ export function PublicLoginPage() {
           country: customer.country.trim() || "IN",
           pinCode: customer.pinCode.trim(),
         });
-        toast.success("Customer account created successfully");
-        navigate("/app/customer");
+        toast.success(
+          module === "tanker" ? "Tanker customer account created" : "Customer account created successfully",
+        );
+        navigate(publicHomePath(intent, module));
+        return;
+      }
+
+      if (mode === "signup" && intent === "supplier") {
+        const lat = Number(supplier.latitude);
+        const lng = Number(supplier.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          throw new Error("Enter valid latitude and longitude");
+        }
+        if (!supplier.proofUrl.trim()) {
+          throw new Error("Upload suppliership proof");
+        }
+        if (!supplier.firstName.trim()) {
+          throw new Error("Enter first name");
+        }
+        if (!supplier.address.trim() || !supplier.landmark.trim()) {
+          throw new Error("Enter address and landmark");
+        }
+
+        const fullName = `${supplier.firstName} ${supplier.lastName}`.trim().replace(/\s+/g, " ");
+        const vehiclePayloads = vehicles.map((v, index) => {
+          const driverFullName = `${v.driverFirstName} ${v.driverLastName}`.trim().replace(/\s+/g, " ");
+          if (!v.driverFirstName.trim()) {
+            throw new Error(`Vehicle ${index + 1}: enter driver first name`);
+          }
+          if (!v.driverEmail.trim()) {
+            throw new Error(`Vehicle ${index + 1}: enter driver email`);
+          }
+          if (v.driverMobile.replace(/\D/g, "").length !== 10) {
+            throw new Error(`Vehicle ${index + 1}: enter valid 10-digit driver mobile`);
+          }
+          if (!v.vehicleNumber.trim()) {
+            throw new Error(`Vehicle ${index + 1}: enter vehicle number`);
+          }
+          const capacityLitres = Number(v.capacityLitres);
+          if (!Number.isFinite(capacityLitres) || capacityLitres <= 0) {
+            throw new Error(`Vehicle ${index + 1}: enter valid tanker capacity in litres`);
+          }
+          const amountInPaise = Math.round(Number(v.amountInr) * 100);
+          if (!Number.isFinite(amountInPaise) || amountInPaise <= 0) {
+            throw new Error(`Vehicle ${index + 1}: enter valid tanker amount in INR`);
+          }
+          if (!v.licenceFrontUrl.trim() || !v.licenceBackUrl.trim()) {
+            throw new Error(`Vehicle ${index + 1}: upload licence front and back`);
+          }
+          return {
+            driverFullName,
+            driverMobile: v.driverMobile.replace(/\D/g, "").slice(0, 10),
+            driverEmail: v.driverEmail.trim(),
+            vehicleNumber: v.vehicleNumber.trim(),
+            capacityLitres,
+            amountInPaise,
+            waterType: v.waterType,
+            licenceFrontUrl: v.licenceFrontUrl.trim(),
+            licenceBackUrl: v.licenceBackUrl.trim(),
+            tankerImageUrl: v.tankerImageUrl.trim() || null,
+          };
+        });
+
+        await signupPublic(phone, otp, "supplier", module, {
+          fullName,
+          email: supplier.email.trim(),
+          city: supplier.city.trim(),
+          state: supplier.state.trim(),
+          country: "IN",
+          pinCode: supplier.pinCode.trim(),
+        });
+
+        await api.post("/tanker/suppliers/register", {
+          fullName,
+          email: supplier.email.trim(),
+          alternateMobile: supplier.alternateMobile.replace(/\D/g, "").slice(0, 10) || null,
+          address: supplier.address.trim(),
+          landmark: supplier.landmark.trim(),
+          city: supplier.city.trim(),
+          state: supplier.state.trim(),
+          country: "IN",
+          pinCode: supplier.pinCode.trim(),
+          availabilityStartTime: supplier.availabilityStartTime,
+          availabilityEndTime: supplier.availabilityEndTime,
+          latitude: lat,
+          longitude: lng,
+          proofUrl: supplier.proofUrl.trim(),
+          vehicles: vehiclePayloads,
+        });
+
+        toast.success("Supplier registered successfully");
+        navigate(publicHomePath("supplier", module));
         return;
       }
 
@@ -139,7 +341,7 @@ export function PublicLoginPage() {
           throw new Error("Full name and bank account holder name must match");
         }
 
-        await signupPublic(phone, otp, "owner", {
+        await signupPublic(phone, otp, "owner", module, {
           fullName,
           email: owner.email.trim(),
           city: owner.city.trim(),
@@ -192,9 +394,9 @@ export function PublicLoginPage() {
         return;
       }
 
-      await loginPublic(phone, otp, intent);
+      await loginPublic(phone, otp, intent, module);
       toast.success("Logged in successfully");
-      navigate(intent === "owner" ? "/app/owner" : "/app/customer");
+      navigate(publicHomePath(intent, module));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : mode === "signup" ? "Signup failed" : "Login failed");
     } finally {
@@ -202,18 +404,26 @@ export function PublicLoginPage() {
     }
   }
 
-  const wide = mode === "signup" && intent === "owner";
+  const wide = mode === "signup" && (intent === "owner" || intent === "supplier");
+
+  const productLabel = module === "tanker" ? "Water tanker" : "Parking";
 
   return (
     <div className="auth-page">
       <div className={wide ? "auth-card auth-card-wide" : "auth-card"}>
-        <p className="brand-kicker">Paashupatastra</p>
-        <h1>{mode === "signup" ? "Create account" : "Customer / Owner login"}</h1>
+        <p className="brand-kicker">Paashupatastra · {productLabel}</p>
+        <h1>
+          {mode === "signup" ? `Create ${productLabel.toLowerCase()} account` : `${productLabel} login`}
+        </h1>
         <p className="auth-sub">
           {mode === "signup"
             ? intent === "owner"
               ? "Register as an apartment parking owner with full listing details."
-              : "Sign up as a parking customer."
+              : intent === "supplier"
+                ? "Register as a water tanker supplier with fleet and drivers."
+                : module === "tanker"
+                  ? "Sign up as a water tanker customer."
+                  : "Sign up as a parking customer."
             : "Login with your registered mobile number."}
         </p>
 
@@ -242,13 +452,33 @@ export function PublicLoginPage() {
           >
             Customer
           </button>
-          <button
-            type="button"
-            className={intent === "owner" ? "intent active" : "intent"}
-            onClick={() => setIntent("owner")}
-          >
-            Parking owner
-          </button>
+          {module === "parking" ? (
+            <button
+              type="button"
+              className={intent === "owner" ? "intent active" : "intent"}
+              onClick={() => setIntent("owner")}
+            >
+              Parking owner
+            </button>
+          ) : null}
+          {module === "tanker" ? (
+            <button
+              type="button"
+              className={intent === "supplier" ? "intent active" : "intent"}
+              onClick={() => setIntent("supplier")}
+            >
+              Water supplier
+            </button>
+          ) : null}
+          {module === "tanker" && mode === "login" ? (
+            <button
+              type="button"
+              className={intent === "driver" ? "intent active" : "intent"}
+              onClick={() => setIntent("driver")}
+            >
+              Tanker driver
+            </button>
+          ) : null}
         </div>
 
         {!otpSent ? (
@@ -318,6 +548,338 @@ export function PublicLoginPage() {
                       onChange={(e) => setCustomer({ ...customer, country: e.target.value })}
                     />
                   </div>
+                </div>
+              </>
+            ) : null}
+
+            {mode === "signup" && intent === "supplier" ? (
+              <>
+                <div className="form-section">
+                  <h4>1. Personal details</h4>
+                  <div className="grid-2">
+                    <div className="field">
+                      <label htmlFor="s-first">First name</label>
+                      <input
+                        id="s-first"
+                        required
+                        minLength={2}
+                        value={supplier.firstName}
+                        onChange={(e) => setSupplier({ ...supplier, firstName: e.target.value })}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="s-last">Last name</label>
+                      <input
+                        id="s-last"
+                        value={supplier.lastName}
+                        onChange={(e) => setSupplier({ ...supplier, lastName: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <div className="grid-2">
+                    <div className="field">
+                      <label htmlFor="s-email">Email</label>
+                      <input
+                        id="s-email"
+                        type="email"
+                        required
+                        value={supplier.email}
+                        onChange={(e) => setSupplier({ ...supplier, email: e.target.value })}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="s-alt-mobile">Alternate mobile (optional)</label>
+                      <input
+                        id="s-alt-mobile"
+                        inputMode="numeric"
+                        pattern="[6-9][0-9]{9}"
+                        maxLength={10}
+                        placeholder="10-digit mobile"
+                        value={supplier.alternateMobile}
+                        onChange={(e) =>
+                          setSupplier({
+                            ...supplier,
+                            alternateMobile: e.target.value.replace(/\D/g, "").slice(0, 10),
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="form-section">
+                  <h4>2. Address</h4>
+                  <div className="field">
+                    <label htmlFor="s-address">Address</label>
+                    <input
+                      id="s-address"
+                      required
+                      minLength={3}
+                      value={supplier.address}
+                      onChange={(e) => setSupplier({ ...supplier, address: e.target.value })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="s-landmark">Landmark</label>
+                    <input
+                      id="s-landmark"
+                      required
+                      value={supplier.landmark}
+                      onChange={(e) => setSupplier({ ...supplier, landmark: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid-2">
+                    <div className="field">
+                      <label htmlFor="s-city">City</label>
+                      <input
+                        id="s-city"
+                        required
+                        value={supplier.city}
+                        onChange={(e) => setSupplier({ ...supplier, city: e.target.value })}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="s-state">State</label>
+                      <input
+                        id="s-state"
+                        required
+                        value={supplier.state}
+                        onChange={(e) => setSupplier({ ...supplier, state: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <div className="grid-2">
+                    <div className="field">
+                      <label htmlFor="s-pin">PIN code</label>
+                      <input
+                        id="s-pin"
+                        required
+                        maxLength={6}
+                        pattern="[0-9]{6}"
+                        value={supplier.pinCode}
+                        onChange={(e) =>
+                          setSupplier({ ...supplier, pinCode: e.target.value.replace(/\D/g, "").slice(0, 6) })
+                        }
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="s-country">Country</label>
+                      <input id="s-country" required readOnly value="India" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="form-section">
+                  <h4>3. Availability & location</h4>
+                  <div className="grid-2">
+                    <div className="field">
+                      <label htmlFor="s-start">Availability start time</label>
+                      <input
+                        id="s-start"
+                        type="time"
+                        required
+                        value={supplier.availabilityStartTime}
+                        onChange={(e) => setSupplier({ ...supplier, availabilityStartTime: e.target.value })}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="s-end">Availability end time</label>
+                      <input
+                        id="s-end"
+                        type="time"
+                        required
+                        value={supplier.availabilityEndTime}
+                        onChange={(e) => setSupplier({ ...supplier, availabilityEndTime: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <GeoCoordFields
+                    idPrefix="s"
+                    active={mode === "signup" && intent === "supplier"}
+                    required
+                    latitude={supplier.latitude}
+                    longitude={supplier.longitude}
+                    onChange={({ latitude, longitude }) =>
+                      setSupplier((s) => ({ ...s, latitude, longitude }))
+                    }
+                  />
+                </div>
+
+                <div className="form-section">
+                  <h4>4. Suppliership proof</h4>
+                  <p>Upload images or PDF (max 8 MB).</p>
+                  <FileUploadField
+                    label="Suppliership proof"
+                    required
+                    value={supplier.proofUrl}
+                    onChange={(url) => setSupplier({ ...supplier, proofUrl: url })}
+                  />
+                </div>
+
+                <div className="form-section">
+                  <h4>5. Tanker / driver fleet</h4>
+                  {vehicles.map((vehicle, index) => (
+                    <div key={index} className="form-section" style={{ marginTop: index > 0 ? "1rem" : 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <h4 style={{ margin: 0 }}>Tanker {index + 1}</h4>
+                        {vehicles.length > 1 ? (
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={() => removeVehicle(index)}
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="grid-2">
+                        <div className="field">
+                          <label htmlFor={`v-first-${index}`}>Driver first name</label>
+                          <input
+                            id={`v-first-${index}`}
+                            required
+                            minLength={2}
+                            value={vehicle.driverFirstName}
+                            onChange={(e) => updateVehicle(index, { driverFirstName: e.target.value })}
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor={`v-last-${index}`}>Driver last name</label>
+                          <input
+                            id={`v-last-${index}`}
+                            value={vehicle.driverLastName}
+                            onChange={(e) => updateVehicle(index, { driverLastName: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                      <div className="grid-2">
+                        <div className="field">
+                          <label htmlFor={`v-email-${index}`}>Driver email</label>
+                          <input
+                            id={`v-email-${index}`}
+                            type="email"
+                            required
+                            value={vehicle.driverEmail}
+                            onChange={(e) => updateVehicle(index, { driverEmail: e.target.value })}
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor={`v-mobile-${index}`}>Driver mobile</label>
+                          <input
+                            id={`v-mobile-${index}`}
+                            inputMode="numeric"
+                            pattern="[6-9][0-9]{9}"
+                            maxLength={10}
+                            required
+                            placeholder="10-digit mobile"
+                            value={vehicle.driverMobile}
+                            onChange={(e) =>
+                              updateVehicle(index, {
+                                driverMobile: e.target.value.replace(/\D/g, "").slice(0, 10),
+                              })
+                            }
+                          />
+                        </div>
+                      </div>
+                      <div className="grid-2">
+                        <div className="field">
+                          <label htmlFor={`v-water-${index}`}>Water type</label>
+                          <select
+                            id={`v-water-${index}`}
+                            required
+                            value={vehicle.waterType}
+                            onChange={(e) => updateVehicle(index, { waterType: e.target.value })}
+                          >
+                            {WATER_TYPE_OPTIONS.map((option) => (
+                              <option key={option} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="field">
+                          <label htmlFor={`v-number-${index}`}>Vehicle number</label>
+                          <input
+                            id={`v-number-${index}`}
+                            required
+                            value={vehicle.vehicleNumber}
+                            onChange={(e) => updateVehicle(index, { vehicleNumber: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                      <div className="grid-2">
+                        <div className="field">
+                          <label htmlFor={`v-capacity-${index}`}>Tanker capacity (litres)</label>
+                          <input
+                            id={`v-capacity-${index}`}
+                            required
+                            inputMode="numeric"
+                            value={vehicle.capacityLitres}
+                            onChange={(e) => updateVehicle(index, { capacityLitres: e.target.value })}
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor={`v-amount-${index}`}>Tanker amount (INR)</label>
+                          <input
+                            id={`v-amount-${index}`}
+                            required
+                            inputMode="decimal"
+                            value={vehicle.amountInr}
+                            onChange={(e) => updateVehicle(index, { amountInr: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                      <FileUploadField
+                        label="Licence front"
+                        required
+                        value={vehicle.licenceFrontUrl}
+                        onChange={(url) => updateVehicle(index, { licenceFrontUrl: url })}
+                      />
+                      <FileUploadField
+                        label="Licence back"
+                        required
+                        value={vehicle.licenceBackUrl}
+                        onChange={(url) => updateVehicle(index, { licenceBackUrl: url })}
+                      />
+                      <FileUploadField
+                        label="Tanker image (optional)"
+                        value={vehicle.tankerImageUrl}
+                        onChange={(url) => updateVehicle(index, { tankerImageUrl: url })}
+                      />
+                      <div className="grid-2">
+                        <div className="field">
+                          <label htmlFor={`v-lat-${index}`}>Driver latitude (optional)</label>
+                          <input
+                            id={`v-lat-${index}`}
+                            inputMode="decimal"
+                            placeholder={supplier.latitude || "Same as supplier"}
+                            value={vehicle.latitude}
+                            onChange={(e) => updateVehicle(index, { latitude: e.target.value })}
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor={`v-lng-${index}`}>Driver longitude (optional)</label>
+                          <input
+                            id={`v-lng-${index}`}
+                            inputMode="decimal"
+                            placeholder={supplier.longitude || "Same as supplier"}
+                            value={vehicle.longitude}
+                            onChange={(e) => updateVehicle(index, { longitude: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => copySupplierLocationToVehicle(index)}
+                      >
+                        Use supplier location
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className="btn btn-ghost" onClick={addVehicle}>
+                    Add another tanker
+                  </button>
                 </div>
               </>
             ) : null}
@@ -437,30 +999,16 @@ export function PublicLoginPage() {
                       />
                     </div>
                   </div>
-                  <div className="grid-2">
-                    <div className="field">
-                      <label htmlFor="o-lat">Latitude</label>
-                      <input
-                        id="o-lat"
-                        required
-                        inputMode="decimal"
-                        placeholder="17.4485"
-                        value={owner.latitude}
-                        onChange={(e) => setOwner({ ...owner, latitude: e.target.value })}
-                      />
-                    </div>
-                    <div className="field">
-                      <label htmlFor="o-lng">Longitude</label>
-                      <input
-                        id="o-lng"
-                        required
-                        inputMode="decimal"
-                        placeholder="78.3908"
-                        value={owner.longitude}
-                        onChange={(e) => setOwner({ ...owner, longitude: e.target.value })}
-                      />
-                    </div>
-                  </div>
+                  <GeoCoordFields
+                    idPrefix="o"
+                    active={mode === "signup" && intent === "owner"}
+                    required
+                    latitude={owner.latitude}
+                    longitude={owner.longitude}
+                    onChange={({ latitude, longitude }) =>
+                      setOwner((o) => ({ ...o, latitude, longitude }))
+                    }
+                  />
                 </div>
 
                 <div className="form-section">
@@ -692,8 +1240,10 @@ export function PublicLoginPage() {
                 : mode === "signup"
                   ? intent === "owner"
                     ? "Verify & submit owner registration"
-                    : "Create customer account"
-                  : `Continue as ${intent === "owner" ? "Owner" : "Customer"}`}
+                    : intent === "supplier"
+                      ? "Verify & complete supplier registration"
+                      : "Create customer account"
+                  : `Continue as ${intentLabel(intent)}`}
             </button>
             <button
               type="button"
@@ -709,7 +1259,9 @@ export function PublicLoginPage() {
         )}
 
         <p className="auth-switch">
-          Staff member? <Link to="/staff/login">Admin / Executive / Manager login</Link>
+          <Link to="/">← Back to product choice</Link>
+          {" · "}
+          Staff? Use Parking staff or Tanker staff on the home page.
         </p>
       </div>
     </div>

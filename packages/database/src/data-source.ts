@@ -9,14 +9,24 @@ import { ParkingBookingEntity } from "./entities/parking-booking.entity";
 import { ParkingListingEntity } from "./entities/parking-listing.entity";
 import { ParkingSlotEntity } from "./entities/parking-slot.entity";
 import { UserDocumentEntity } from "./entities/user-document.entity";
+import { TankerUserEntity } from "./entities/tanker-user.entity";
 import { UserEntity } from "./entities/user.entity";
 import { VerificationAssignmentEntity } from "./entities/verification-assignment.entity";
 import { VerificationReportEntity } from "./entities/verification-report.entity";
 import { WalletTransactionEntity } from "./entities/wallet-transaction.entity";
 import { WalletEntity } from "./entities/wallet.entity";
+import { TankerSupplierEntity } from "./entities/tanker-supplier.entity";
+import { TankerVehicleEntity } from "./entities/tanker-vehicle.entity";
+import { TankerRequestEntity } from "./entities/tanker-request.entity";
+import { TankerOrderEntity } from "./entities/tanker-order.entity";
+import { TankerInvoiceEntity } from "./entities/tanker-invoice.entity";
+import { TankerPromoCodeEntity } from "./entities/tanker-promo-code.entity";
+import { TankerTaxSettingEntity } from "./entities/tanker-tax-setting.entity";
+import { TankerPlatformFeeSettingEntity } from "./entities/tanker-platform-fee-setting.entity";
 
 export const allEntities = [
   UserEntity,
+  TankerUserEntity,
   OtpChallengeEntity,
   UserDocumentEntity,
   BankAccountEntity,
@@ -30,6 +40,14 @@ export const allEntities = [
   WalletTransactionEntity,
   CommissionConfigEntity,
   NotificationLogEntity,
+  TankerSupplierEntity,
+  TankerVehicleEntity,
+  TankerRequestEntity,
+  TankerOrderEntity,
+  TankerInvoiceEntity,
+  TankerPromoCodeEntity,
+  TankerTaxSettingEntity,
+  TankerPlatformFeeSettingEntity,
 ];
 
 export function buildDataSourceOptions(overrides: Partial<DataSourceOptions> = {}): DataSourceOptions {

@@ -19,7 +19,16 @@ type Listing = {
   priceInPaise: number;
   rentType: string;
   status: string;
+  availabilityStartTime?: string;
+  availabilityEndTime?: string;
+  availableDays?: string;
 };
+
+function formatAvailableDays(days?: string) {
+  if (days === "weekdays") return "Weekdays";
+  if (days === "weekends") return "Weekends";
+  return "All days";
+}
 
 type Quote = {
   listingId: string;
@@ -205,7 +214,10 @@ export function CustomerSearchPage() {
       <div className="topbar">
         <div>
           <h2>Search parking</h2>
-          <p>Choose check-in / check-out times. Booked slots are hidden for that window.</p>
+          <p>
+            Choose check-in / check-out. Only slots free in that window and matching the owner&apos;s
+            available hours are shown.
+          </p>
         </div>
       </div>
 
@@ -235,6 +247,7 @@ export function CustomerSearchPage() {
               <tr>
                 <th>Apartment</th>
                 <th>Slot</th>
+                <th>Owner hours</th>
                 <th>Price</th>
                 <th>Status</th>
                 <th />
@@ -254,6 +267,14 @@ export function CustomerSearchPage() {
                     {item.parkingSlotNumber} · {item.parkingType}
                   </td>
                   <td>
+                    {item.availabilityStartTime && item.availabilityEndTime
+                      ? `${item.availabilityStartTime}–${item.availabilityEndTime}`
+                      : "—"}
+                    <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                      {formatAvailableDays(item.availableDays)}
+                    </div>
+                  </td>
+                  <td>
                     {formatInrFromPaise(item.priceInPaise)}
                     <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{item.rentType}</div>
                   </td>
@@ -269,8 +290,8 @@ export function CustomerSearchPage() {
               ))}
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="empty">
-                    No available listings for this time window.
+                  <td colSpan={6} className="empty">
+                    No available listings for this check-in / check-out window (or outside owner hours).
                   </td>
                 </tr>
               ) : null}
@@ -317,6 +338,15 @@ export function CustomerSearchPage() {
                   {selected.addressLine ?? selected.city} · {selected.rentType}{" "}
                   {formatInrFromPaise(selected.priceInPaise)}
                 </span>
+                {selected.availabilityStartTime && selected.availabilityEndTime ? (
+                  <>
+                    <br />
+                    <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+                      Owner available {selected.availabilityStartTime}–{selected.availabilityEndTime} ·{" "}
+                      {formatAvailableDays(selected.availableDays)}
+                    </span>
+                  </>
+                ) : null}
               </p>
               <div className="grid-2">
                 <div className="field">

@@ -3,19 +3,15 @@ import {
   BankAccountEntity,
   CommissionConfigEntity,
   ParkingBookingEntity,
+  TankerOrderEntity,
+  TankerUserEntity,
   UserEntity,
   WalletEntity,
   WalletTransactionEntity,
   getDataSource,
   toIsoRequired,
 } from "@paashupatastra/database";
-import {
-  createService,
-  envInt,
-  getRolesFromHeaders,
-  getUserIdFromHeaders,
-  loadEnv,
-} from "@paashupatastra/service-kit";
+import { createService, envInt, getRolesFromHeaders, getUserIdFromHeaders, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import {
   BookingStatus,
   UserRole,
@@ -23,7 +19,7 @@ import {
   paginationQuerySchema,
   withdrawWalletSchema,
 } from "@paashupatastra/shared-models";
-import { Repository } from "typeorm";
+import { In, Repository } from "typeorm";
 import { z } from "zod";
 import {
   appPublicUrl,
@@ -33,19 +29,144 @@ import {
   gatewayPublicUrl,
   getCashfreeOrder,
   isCashfreePaid,
+  tankerOrderIdFromCashfreeOrderId,
   toCashfreeOrderId,
+  toCashfreeTankerOrderId,
   verifyCashfreeWebhookSignature,
 } from "./cashfree";
 
-const PLATFORM_USER_ID = "00000000-0000-4000-8000-000000000001";
+const paymentOrderTargetBaseSchema = z.object({
+  bookingId: z.coerce.number().int().positive().optional(),
+  tankerOrderId: z.coerce.number().int().positive().optional(),
+});
 
-async function getOrCreateWallet(repo: Repository<WalletEntity>, userId: string, type: string) {
+const paymentOrderTargetSchema = paymentOrderTargetBaseSchema.refine(
+  (d) => Boolean(d.bookingId) !== Boolean(d.tankerOrderId),
+  {
+    message: "Provide exactly one of bookingId or tankerOrderId",
+  },
+);
+
+const paymentOrderVerifySchema = paymentOrderTargetBaseSchema
+  .extend({
+    orderId: z.string().min(3).optional(),
+  })
+  .refine((d) => Boolean(d.bookingId) !== Boolean(d.tankerOrderId), {
+    message: "Provide exactly one of bookingId or tankerOrderId",
+  });
+
+function tankerOrderAmountInPaise(order: TankerOrderEntity) {
+  return (
+    order.totalAmountInPaise ||
+    order.amountInPaise + order.platformFeeInPaise + order.taxInPaise - order.discountInPaise ||
+    order.amountInPaise
+  );
+}
+
+function tankerServiceUrl() {
+  return (process.env.TANKER_URL ?? "http://localhost:3007").replace(/\/$/, "");
+}
+
+type TankerCustomerLike = Pick<TankerUserEntity, "id" | "phone" | "email" | "name">;
+
+async function findTankerCustomer(
+  tankerUserRepo: Repository<TankerUserEntity>,
+  userRepo: Repository<UserEntity>,
+  customerUserId: number,
+): Promise<TankerCustomerLike | null> {
+  return (
+    (await tankerUserRepo.findOne({ where: { id: customerUserId } })) ??
+    (await userRepo.findOne({ where: { id: customerUserId } }))
+  );
+}
+
+async function confirmTankerPayment(
+  tankerOrderId: number,
+  customerUserId: number,
+  orderId: string,
+  source: string,
+) {
+  const res = await fetch(`${tankerServiceUrl()}/v1/tanker/orders/${tankerOrderId}/confirm-payment`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": String(customerUserId),
+    },
+    body: JSON.stringify({ orderId, source }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new Error(data?.error?.message ?? `Tanker confirm-payment failed (${res.status})`);
+  }
+}
+
+/**
+ * Platform escrow wallet is NOT tied to a real user account.
+ * Using userId=1 conflated admin/platform holdings with whoever got id=1 (often an owner).
+ */
+const PLATFORM_WALLET_USER_ID = 0;
+
+async function getPlatformWallet(repo: Repository<WalletEntity>) {
+  let wallet = await repo.findOne({ where: { type: "platform" } });
+  if (!wallet) {
+    // Legacy: funds may sit on userId=1 typed as platform
+    const legacy = await repo.findOne({ where: { userId: 1, type: "platform" } });
+    if (legacy) {
+      legacy.userId = PLATFORM_WALLET_USER_ID;
+      wallet = await repo.save(legacy);
+      return wallet;
+    }
+    wallet = await repo.save(
+      repo.create({
+        userId: PLATFORM_WALLET_USER_ID,
+        type: "platform",
+        balanceInPaise: "0",
+        currency: "INR",
+      }),
+    );
+    return wallet;
+  }
+
+  if (wallet.userId !== PLATFORM_WALLET_USER_ID) {
+    // Detach platform balance from a real user so /wallets/me never shows escrow
+    const previousUserId = wallet.userId;
+    wallet.userId = PLATFORM_WALLET_USER_ID;
+    wallet = await repo.save(wallet);
+
+    // Give that user a fresh empty personal wallet if they no longer have one
+    const personal = await repo.findOne({ where: { userId: previousUserId } });
+    if (!personal) {
+      await repo.save(
+        repo.create({
+          userId: previousUserId,
+          type: "owner",
+          balanceInPaise: "0",
+          currency: "INR",
+        }),
+      );
+    }
+  }
+
+  return wallet;
+}
+
+async function getOrCreateWallet(repo: Repository<WalletEntity>, userId: number, type: string) {
+  if (type === "platform") {
+    return getPlatformWallet(repo);
+  }
+
+  // Never return the platform escrow wallet for a real user
   let wallet = await repo.findOne({ where: { userId } });
+  if (wallet && wallet.type === "platform") {
+    await getPlatformWallet(repo);
+    wallet = await repo.findOne({ where: { userId } });
+  }
+
   if (!wallet) {
     wallet = await repo.save(
       repo.create({
         userId,
-        type,
+        type: type === "owner" ? "owner" : "customer",
         balanceInPaise: "0",
         currency: "INR",
       }),
@@ -61,6 +182,18 @@ function walletTypeForUser(headers: Record<string, unknown>) {
   const roles = getRolesFromHeaders(headers);
   if (roles.includes(UserRole.PARKING_OWNER)) return "owner";
   return "customer";
+}
+
+function ownerShareFromBooking(booking: ParkingBookingEntity) {
+  const total = booking.totalAmountInPaise || booking.amountInPaise;
+  const platformFee = booking.platformFeeInPaise || 0;
+  const tax = booking.taxInPaise || 0;
+  return {
+    total,
+    platformFee,
+    tax,
+    ownerShare: Math.max(0, total - platformFee - tax),
+  };
 }
 
 function serializeTxn(row: WalletTransactionEntity) {
@@ -85,7 +218,7 @@ async function creditPlatformFromBooking(
   notes: string,
 ) {
   if (booking.paymentStatus === "paid" && booking.status !== BookingStatus.PENDING) {
-    const platformWallet = await getOrCreateWallet(walletRepo, PLATFORM_USER_ID, "platform");
+    const platformWallet = await getPlatformWallet(walletRepo);
     return {
       ok: true as const,
       alreadyPaid: true,
@@ -100,7 +233,7 @@ async function creditPlatformFromBooking(
   }
 
   const amount = booking.totalAmountInPaise || booking.amountInPaise;
-  const platformWallet = await getOrCreateWallet(walletRepo, PLATFORM_USER_ID, "platform");
+  const platformWallet = await getPlatformWallet(walletRepo);
   const newBalance = Number(platformWallet.balanceInPaise) + amount;
   platformWallet.balanceInPaise = String(newBalance);
   await walletRepo.save(platformWallet);
@@ -116,6 +249,7 @@ async function creditPlatformFromBooking(
     }),
   );
 
+  // Customer ledger entry only (does not change customer balance; cash collected via Cashfree)
   const customerWallet = await getOrCreateWallet(walletRepo, booking.renterUserId, "customer");
   const customerBal = Number(customerWallet.balanceInPaise);
   await txnRepo.save(
@@ -126,7 +260,7 @@ async function creditPlatformFromBooking(
       balanceAfterInPaise: String(customerBal),
       purpose: "booking_payment",
       referenceId: booking.id,
-      notes: "Paid for parking booking via Cashfree (held in platform wallet)",
+      notes: "Paid for parking booking via Cashfree (held in platform wallet until check-out)",
     }),
   );
 
@@ -151,10 +285,12 @@ async function main() {
   const txnRepo = ds.getRepository(WalletTransactionEntity);
   const commissionRepo = ds.getRepository(CommissionConfigEntity);
   const bookingRepo = ds.getRepository(ParkingBookingEntity);
+  const tankerOrderRepo = ds.getRepository(TankerOrderEntity);
+  const tankerUserRepo = ds.getRepository(TankerUserEntity);
   const userRepo = ds.getRepository(UserEntity);
   const bankRepo = ds.getRepository(BankAccountEntity);
 
-  await getOrCreateWallet(walletRepo, PLATFORM_USER_ID, "platform");
+  await getPlatformWallet(walletRepo);
 
   let commission = await commissionRepo.findOne({ where: { moduleName: "parking", isActive: true } });
   if (!commission) {
@@ -200,16 +336,42 @@ async function main() {
 
       app.get("/v1/payments/wallets/me", async (request, reply) => {
         const headers = request.headers as Record<string, unknown>;
-        const userId = getUserIdFromHeaders(headers);
+        const userId = parseUserIdFromHeaders(headers);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
-        const wallet = await getOrCreateWallet(walletRepo, userId, walletTypeForUser(headers));
+        const walletType = walletTypeForUser(headers);
+        const wallet = await getOrCreateWallet(walletRepo, userId, walletType);
+
+        let pendingSettlementInPaise = 0;
+        if (walletType === "owner") {
+          const held = await bookingRepo.find({
+            where: {
+              ownerUserId: userId,
+              paymentStatus: "paid",
+              status: In([BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN]),
+            },
+          });
+          for (const b of held) {
+            const settled = await txnRepo.exist({
+              where: {
+                referenceId: b.id,
+                purpose: "settlement",
+                type: WalletTxnType.CREDIT,
+              },
+            });
+            if (!settled) {
+              pendingSettlementInPaise += ownerShareFromBooking(b).ownerShare;
+            }
+          }
+        }
+
         return {
           id: wallet.id,
           userId: wallet.userId,
           type: wallet.type,
           balanceInPaise: Number(wallet.balanceInPaise),
+          pendingSettlementInPaise,
           currency: wallet.currency,
           updatedAt: toIsoRequired(wallet.updatedAt),
         };
@@ -217,7 +379,7 @@ async function main() {
 
       app.get("/v1/payments/wallets/me/transactions", async (request, reply) => {
         const headers = request.headers as Record<string, unknown>;
-        const userId = getUserIdFromHeaders(headers);
+        const userId = parseUserIdFromHeaders(headers);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -246,7 +408,7 @@ async function main() {
 
       app.post("/v1/payments/wallets/me/withdraw", async (request, reply) => {
         const headers = request.headers as Record<string, unknown>;
-        const userId = getUserIdFromHeaders(headers);
+        const userId = parseUserIdFromHeaders(headers);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
@@ -368,7 +530,7 @@ async function main() {
       });
 
       app.get("/v1/payments/wallets/platform", async () => {
-        const wallet = await getOrCreateWallet(walletRepo, PLATFORM_USER_ID, "platform");
+        const wallet = await getPlatformWallet(walletRepo);
         return {
           id: wallet.id,
           userId: wallet.userId,
@@ -379,7 +541,7 @@ async function main() {
       });
 
       app.get("/v1/payments/wallets/:userId/transactions", async (request) => {
-        const { userId } = request.params as { userId: string };
+        const userId = parseEntityId((request.params as { userId: string }).userId);
         const query = paginationQuerySchema.parse(request.query);
         const wallet = await getOrCreateWallet(walletRepo, userId, "owner");
         const [items, total] = await txnRepo.findAndCount({
@@ -397,19 +559,15 @@ async function main() {
         };
       });
 
-      /** Create Cashfree sandbox/production order for a booking */
+      /** Create Cashfree sandbox/production order for a booking or tanker order */
       app.post("/v1/payments/orders", async (request, reply) => {
         const headers = request.headers as Record<string, unknown>;
-        const userId = getUserIdFromHeaders(headers);
+        const userId = parseUserIdFromHeaders(headers);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
 
-        const body = z
-          .object({
-            bookingId: z.string().uuid(),
-          })
-          .parse(request.body);
+        const body = paymentOrderTargetSchema.parse(request.body);
 
         const cfg = cashfreeConfig();
         if (!cfg.configured) {
@@ -422,7 +580,80 @@ async function main() {
           });
         }
 
-        const booking = await bookingRepo.findOne({ where: { id: body.bookingId } });
+        if (body.tankerOrderId) {
+          const order = await tankerOrderRepo.findOne({ where: { id: body.tankerOrderId } });
+          if (!order) {
+            return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Tanker order not found" } });
+          }
+          if (order.customerUserId !== userId) {
+            return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your tanker order" } });
+          }
+          if (order.paymentStatus === "paid") {
+            return reply.code(400).send({
+              error: { code: "ALREADY_PAID", message: "Tanker order is already paid" },
+            });
+          }
+
+          const customer = await findTankerCustomer(tankerUserRepo, userRepo, order.customerUserId);
+          if (!customer?.phone) {
+            return reply.code(400).send({
+              error: { code: "CUSTOMER_PHONE_REQUIRED", message: "Customer phone is required for Cashfree" },
+            });
+          }
+
+          const orderId = toCashfreeTankerOrderId(order.id);
+          const amountInPaise = tankerOrderAmountInPaise(order);
+          const amountInr = amountInPaise / 100;
+          const returnUrl = `${appPublicUrl()}/app/tanker/payment/return?tanker_order_id=${order.id}&order_id={order_id}`;
+          const notifyUrl = `${gatewayPublicUrl()}/v1/payments/webhooks/cashfree`;
+
+          try {
+            let cashfreeOrder;
+            try {
+              cashfreeOrder = await createCashfreeOrder({
+                orderId,
+                amountInr,
+                customerId: String(customer.id),
+                customerPhone: customer.phone,
+                customerEmail: customer.email,
+                customerName: customer.name,
+                returnUrl,
+                notifyUrl,
+                orderNote: "Paashupatastra tanker order",
+              });
+            } catch (createErr) {
+              cashfreeOrder = await getCashfreeOrder(orderId);
+              if (!cashfreeOrder.payment_session_id) throw createErr;
+            }
+
+            order.paymentProvider = "cashfree";
+            order.paymentProviderOrderId = cashfreeOrder.order_id ?? orderId;
+            await tankerOrderRepo.save(order);
+
+            return reply.code(201).send({
+              id: order.id,
+              tankerOrderId: order.id,
+              orderId: cashfreeOrder.order_id ?? orderId,
+              paymentSessionId: cashfreeOrder.payment_session_id,
+              amountInPaise,
+              amountInr,
+              currency: "INR",
+              status: cashfreeOrder.order_status ?? "ACTIVE",
+              provider: "cashfree",
+              env: cfg.env,
+              returnUrl,
+            });
+          } catch (err) {
+            return reply.code(502).send({
+              error: {
+                code: "CASHFREE_ORDER_FAILED",
+                message: err instanceof Error ? err.message : "Failed to create Cashfree order",
+              },
+            });
+          }
+        }
+
+        const booking = await bookingRepo.findOne({ where: { id: body.bookingId! } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
         }
@@ -454,7 +685,7 @@ async function main() {
             order = await createCashfreeOrder({
               orderId,
               amountInr,
-              customerId: customer.id,
+              customerId: String(customer.id),
               customerPhone: customer.phone,
               customerEmail: customer.email,
               customerName: customer.name,
@@ -494,22 +725,78 @@ async function main() {
         }
       });
 
-      /** Verify Cashfree payment and credit platform wallet */
+      /** Verify Cashfree payment and credit platform wallet (booking) or confirm tanker order */
       app.post("/v1/payments/orders/verify", async (request, reply) => {
         const headers = request.headers as Record<string, unknown>;
-        const userId = getUserIdFromHeaders(headers);
+        const userId = parseUserIdFromHeaders(headers);
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
 
-        const body = z
-          .object({
-            bookingId: z.string().uuid(),
-            orderId: z.string().min(3).optional(),
-          })
-          .parse(request.body);
+        const body = paymentOrderVerifySchema.parse(request.body);
 
-        const booking = await bookingRepo.findOne({ where: { id: body.bookingId } });
+        if (body.tankerOrderId) {
+          const tankerOrder = await tankerOrderRepo.findOne({ where: { id: body.tankerOrderId } });
+          if (!tankerOrder) {
+            return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Tanker order not found" } });
+          }
+          if (tankerOrder.customerUserId !== userId) {
+            return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your tanker order" } });
+          }
+
+          const orderId =
+            body.orderId ?? tankerOrder.paymentProviderOrderId ?? toCashfreeTankerOrderId(tankerOrder.id);
+
+          try {
+            const order = await getCashfreeOrder(orderId);
+            if (!isCashfreePaid(order.order_status)) {
+              return reply.code(402).send({
+                error: {
+                  code: "PAYMENT_PENDING",
+                  message: `Cashfree order status is ${order.order_status ?? "UNKNOWN"}. Complete payment first.`,
+                },
+                orderStatus: order.order_status,
+                orderId,
+              });
+            }
+
+            tankerOrder.paymentProviderOrderId = order.order_id ?? orderId;
+            await tankerOrderRepo.save(tankerOrder);
+
+            try {
+              await confirmTankerPayment(
+                tankerOrder.id,
+                tankerOrder.customerUserId,
+                order.order_id ?? orderId,
+                "cashfree_verify",
+              );
+            } catch (err) {
+              return reply.code(502).send({
+                error: {
+                  code: "TANKER_CONFIRM_FAILED",
+                  message: err instanceof Error ? err.message : "Failed to confirm tanker payment",
+                },
+              });
+            }
+
+            return {
+              ok: true,
+              tankerOrderId: tankerOrder.id,
+              orderId: order.order_id ?? orderId,
+              orderStatus: order.order_status,
+              provider: "cashfree",
+            };
+          } catch (err) {
+            return reply.code(502).send({
+              error: {
+                code: "CASHFREE_VERIFY_FAILED",
+                message: err instanceof Error ? err.message : "Payment verification failed",
+              },
+            });
+          }
+        }
+
+        const booking = await bookingRepo.findOne({ where: { id: body.bookingId! } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
         }
@@ -540,6 +827,25 @@ async function main() {
             bookingRepo,
             `Cashfree payment verified (${orderId})`,
           );
+
+          // Ensure parking sends owner/customer email + in-app notifications
+          try {
+            const parkingUrl = (process.env.PARKING_URL ?? "http://localhost:3004").replace(/\/$/, "");
+            await fetch(`${parkingUrl}/v1/parking/bookings/${booking.id}/confirm-payment`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-user-id": String(booking.renterUserId),
+              },
+              body: JSON.stringify({
+                orderId: order.order_id ?? orderId,
+                source: "cashfree_verify",
+              }),
+            });
+          } catch (err) {
+            app.log.error({ err }, "Failed to notify parking after payment verify");
+          }
+
           return { ...result, orderId, orderStatus: order.order_status, provider: "cashfree" };
         } catch (err) {
           return reply.code(502).send({
@@ -556,7 +862,7 @@ async function main() {
        * With Cashfree configured, verifies order is PAID before crediting wallets.
        */
       app.post("/v1/payments/bookings/:bookingId/collect", async (request, reply) => {
-        const { bookingId } = request.params as { bookingId: string };
+        const bookingId = parseEntityId((request.params as { bookingId: string }).bookingId);
         const body = z
           .object({
             orderId: z.string().min(3).optional(),
@@ -616,7 +922,7 @@ async function main() {
       });
 
       app.post("/v1/payments/bookings/:bookingId/settle", async (request, reply) => {
-        const { bookingId } = request.params as { bookingId: string };
+        const bookingId = parseEntityId((request.params as { bookingId: string }).bookingId);
         const booking = await bookingRepo.findOne({ where: { id: bookingId } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
@@ -629,13 +935,18 @@ async function main() {
             error: { code: "NOT_COMPLETED", message: "Settle only after check-out/completed" },
           });
         }
+        if (booking.paymentStatus !== "paid") {
+          return reply.code(400).send({
+            error: { code: "NOT_PAID", message: "Cannot settle an unpaid booking" },
+          });
+        }
 
         const alreadySettled = await txnRepo.findOne({
           where: { referenceId: booking.id, purpose: "settlement", type: WalletTxnType.CREDIT },
         });
         if (alreadySettled) {
           const ownerWallet = await getOrCreateWallet(walletRepo, booking.ownerUserId, "owner");
-          const platformWallet = await getOrCreateWallet(walletRepo, PLATFORM_USER_ID, "platform");
+          const platformWallet = await getPlatformWallet(walletRepo);
           return {
             ok: true,
             alreadySettled: true,
@@ -646,14 +957,21 @@ async function main() {
           };
         }
 
-        const total = booking.totalAmountInPaise || booking.amountInPaise;
-        const platformFee = booking.platformFeeInPaise || 0;
-        const ownerShare = Math.max(0, total - platformFee - (booking.taxInPaise || 0));
+        const { platformFee, ownerShare } = ownerShareFromBooking(booking);
 
-        const platformWallet = await getOrCreateWallet(walletRepo, PLATFORM_USER_ID, "platform");
+        const platformWallet = await getPlatformWallet(walletRepo);
         const ownerWallet = await getOrCreateWallet(walletRepo, booking.ownerUserId, "owner");
 
         const platformBal = Number(platformWallet.balanceInPaise) - ownerShare;
+        if (platformBal < 0) {
+          return reply.code(409).send({
+            error: {
+              code: "INSUFFICIENT_PLATFORM_BALANCE",
+              message: "Platform wallet does not hold enough to settle this booking",
+            },
+          });
+        }
+
         platformWallet.balanceInPaise = String(platformBal);
         await walletRepo.save(platformWallet);
         await txnRepo.save(
@@ -664,7 +982,7 @@ async function main() {
             balanceAfterInPaise: String(platformBal),
             purpose: "settlement",
             referenceId: booking.id,
-            notes: "Owner settlement debit from platform wallet",
+            notes: "Release owner share from platform escrow after check-out",
           }),
         );
 
@@ -679,7 +997,7 @@ async function main() {
             balanceAfterInPaise: String(ownerBal),
             purpose: "settlement",
             referenceId: booking.id,
-            notes: `Owner credit after commission ${platformFee} paise`,
+            notes: `Owner credit after check-out (platform fee retained ${platformFee} paise)`,
           }),
         );
 
@@ -720,33 +1038,63 @@ async function main() {
           ? await bookingRepo.findOne({ where: { id: bookingId } })
           : await bookingRepo.findOne({ where: { paymentProviderOrderId: orderId } });
 
-        if (!booking) return { received: true, matched: false };
+        if (booking) {
+          const paid =
+            isCashfreePaid(orderStatus) ||
+            (paymentStatus ?? "").toUpperCase() === "SUCCESS" ||
+            payload?.type === "PAYMENT_SUCCESS_WEBHOOK";
+
+          if (paid && booking.paymentStatus !== "paid") {
+            booking.paymentProviderOrderId = orderId;
+            booking.paymentProvider = "cashfree";
+            await bookingRepo.save(booking);
+            try {
+              const parkingUrl = (process.env.PARKING_URL ?? "http://localhost:3004").replace(/\/$/, "");
+              await fetch(`${parkingUrl}/v1/parking/bookings/${booking.id}/confirm-payment`, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "x-user-id": String(booking.renterUserId),
+                },
+                body: JSON.stringify({ orderId, source: "cashfree_webhook" }),
+              });
+            } catch (err) {
+              app.log.error({ err }, "Failed to confirm parking after Cashfree webhook");
+            }
+          }
+
+          return { received: true, matched: true, bookingId: booking.id };
+        }
+
+        const tankerOrderId = tankerOrderIdFromCashfreeOrderId(orderId);
+        const tankerOrder = tankerOrderId
+          ? await tankerOrderRepo.findOne({ where: { id: tankerOrderId } })
+          : await tankerOrderRepo.findOne({ where: { paymentProviderOrderId: orderId } });
+
+        if (!tankerOrder) return { received: true, matched: false };
 
         const paid =
           isCashfreePaid(orderStatus) ||
           (paymentStatus ?? "").toUpperCase() === "SUCCESS" ||
           payload?.type === "PAYMENT_SUCCESS_WEBHOOK";
 
-        if (paid && booking.paymentStatus !== "paid") {
-          booking.paymentProviderOrderId = orderId;
-          booking.paymentProvider = "cashfree";
-          await bookingRepo.save(booking);
+        if (paid && tankerOrder.paymentStatus !== "paid") {
+          tankerOrder.paymentProviderOrderId = orderId;
+          tankerOrder.paymentProvider = "cashfree";
+          await tankerOrderRepo.save(tankerOrder);
           try {
-            const parkingUrl = (process.env.PARKING_URL ?? "http://localhost:3004").replace(/\/$/, "");
-            await fetch(`${parkingUrl}/v1/parking/bookings/${booking.id}/confirm-payment`, {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-                "x-user-id": booking.renterUserId,
-              },
-              body: JSON.stringify({ orderId, source: "cashfree_webhook" }),
-            });
+            await confirmTankerPayment(
+              tankerOrder.id,
+              tankerOrder.customerUserId,
+              orderId,
+              "cashfree_webhook",
+            );
           } catch (err) {
-            app.log.error({ err }, "Failed to confirm parking after Cashfree webhook");
+            app.log.error({ err }, "Failed to confirm tanker after Cashfree webhook");
           }
         }
 
-        return { received: true, matched: true, bookingId: booking.id };
+        return { received: true, matched: true, tankerOrderId: tankerOrder.id };
       });
     },
   });

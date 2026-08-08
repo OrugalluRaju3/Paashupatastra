@@ -1,20 +1,28 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
-import type { StaffIntent } from "../auth/types";
+import type { AuthModule, StaffIntent } from "../auth/types";
+import { staffHomePath } from "../auth/types";
 import { useToast } from "../components/Toast";
 
-const staffOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
-  { id: "super_admin", label: "Super Admin", hint: "Full platform control" },
+const parkingOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
+  { id: "parking_super_admin", label: "Parking Super Admin", hint: "Full parking staff console" },
   { id: "verification_manager", label: "Verification Manager", hint: "Final listing approval" },
   { id: "field_executive", label: "Field Executive", hint: "On-site verification" },
 ];
 
-export function StaffLoginPage() {
+const tankerOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
+  { id: "tanker_super_admin", label: "Tanker Super Admin", hint: "Full tanker staff console" },
+];
+
+export function StaffLoginPage({ module }: { module: AuthModule }) {
   const toast = useToast();
-  const { token, portal, requestOtp, loginStaff } = useAuth();
+  const { token, portal, module: activeModule, requestOtp, loginStaff } = useAuth();
   const navigate = useNavigate();
-  const [intent, setIntent] = useState<StaffIntent>("super_admin");
+  const staffOptions = module === "tanker" ? tankerOptions : parkingOptions;
+  const defaultIntent: StaffIntent =
+    module === "tanker" ? "tanker_super_admin" : "parking_super_admin";
+  const [intent, setIntent] = useState<StaffIntent>(defaultIntent);
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
@@ -22,15 +30,25 @@ export function StaffLoginPage() {
   const [debugOtp, setDebugOtp] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
 
-  if (token && portal === "staff") {
-    return <Navigate to="/staff" replace />;
+  const title = useMemo(
+    () => (module === "tanker" ? "Tanker staff" : "Parking staff"),
+    [module],
+  );
+
+  if (token && portal === "staff" && activeModule === module) {
+    return <Navigate to={staffHomePath(module)} replace />;
   }
 
   async function onSendOtp(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await requestOtp(phone);
+      const res = await requestOtp(phone, {
+        module,
+        purpose: "login",
+        portal: "staff",
+        intent,
+      });
       setDebugOtp(res.debugOtp);
       setOtp("");
       setOtpHint(res.message ?? "OTP sent to your registered email");
@@ -47,9 +65,9 @@ export function StaffLoginPage() {
     e.preventDefault();
     setLoading(true);
     try {
-      await loginStaff(phone, otp, intent);
+      await loginStaff(phone, otp, intent, module);
       toast.success("Logged in successfully");
-      navigate("/staff");
+      navigate(staffHomePath(module));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Login failed");
     } finally {
@@ -60,9 +78,9 @@ export function StaffLoginPage() {
   return (
     <div className="auth-page staff-auth">
       <div className="auth-card">
-        <p className="brand-kicker">Staff portal</p>
-        <h1>Admin / Executive / Manager</h1>
-        <p className="auth-sub">Separate secure login for operations staff.</p>
+        <p className="brand-kicker">{title}</p>
+        <h1>{title} login</h1>
+        <p className="auth-sub">Secure login for {title.toLowerCase()} operations.</p>
 
         <div className="intent-stack">
           {staffOptions.map((opt) => (
@@ -112,7 +130,7 @@ export function StaffLoginPage() {
               {debugOtp ? <p className="auth-hint">Debug OTP: {debugOtp}</p> : null}
             </div>
             <button className="btn btn-primary" type="submit" disabled={loading || otp.length < 4}>
-              {loading ? "Verifying…" : "Login to staff console"}
+              {loading ? "Verifying…" : `Login to ${title.toLowerCase()} console`}
             </button>
             <button
               type="button"
@@ -128,7 +146,7 @@ export function StaffLoginPage() {
         )}
 
         <p className="auth-switch">
-          Customer or owner? <Link to="/login">Go to public login</Link>
+          <Link to="/">← Back to product choice</Link>
         </p>
       </div>
     </div>

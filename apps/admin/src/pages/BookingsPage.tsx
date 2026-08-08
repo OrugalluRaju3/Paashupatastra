@@ -81,7 +81,7 @@ export function BookingsPage() {
       <div className="kpi-grid">
         <KpiCard label="Total bookings" value={stats?.bookingsTotal ?? "—"} />
         <KpiCard label="Active bookings" value={stats?.bookingsActive ?? "—"} />
-        <KpiCard label="Approved listings" value={stats?.approved ?? stats?.slotsApproved ?? "—"} />
+        <KpiCard label="Completed bookings" value={stats?.bookingsCompleted ?? "—"} />
         <KpiCard label="Pending verification" value={stats?.pendingVerification ?? stats?.slotsPending ?? "—"} />
       </div>
 
@@ -117,11 +117,12 @@ export function BookingsPage() {
                 const refId = item.listingId ?? item.slotId;
                 const amount = item.totalAmountInPaise || item.amountInPaise;
                 return (
-                  <tr key={item.id}>
+                  <tr key={String(item.id)}>
                     <td>
-                      <div className="mono">{item.id.slice(0, 8)}…</div>
+                      <div className="mono">#{String(item.id)}</div>
                       <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
-                        {item.listingId ? "Listing" : "Slot"} {refId ? `${refId.slice(0, 8)}…` : "—"}
+                        {item.listingId ? "Listing" : "Slot"}{" "}
+                        {refId != null ? `#${String(refId)}` : "—"}
                       </div>
                     </td>
                     <td>

@@ -2,9 +2,13 @@ import { z } from "zod";
 
 export const UserRole = {
   SUPER_ADMIN: "super_admin",
+  PARKING_SUPER_ADMIN: "parking_super_admin",
+  TANKER_SUPER_ADMIN: "tanker_super_admin",
   VERIFICATION_MANAGER: "verification_manager",
   FIELD_EXECUTIVE: "field_executive",
   PARKING_OWNER: "parking_owner",
+  TANKER_SUPPLIER: "tanker_supplier",
+  TANKER_DRIVER: "tanker_driver",
   CUSTOMER: "customer",
   APARTMENT_ADMIN: "apartment_admin",
   RESIDENT: "resident",
@@ -13,9 +17,13 @@ export const UserRole = {
 
 export const userRoleSchema = z.enum([
   UserRole.SUPER_ADMIN,
+  UserRole.PARKING_SUPER_ADMIN,
+  UserRole.TANKER_SUPER_ADMIN,
   UserRole.VERIFICATION_MANAGER,
   UserRole.FIELD_EXECUTIVE,
   UserRole.PARKING_OWNER,
+  UserRole.TANKER_SUPPLIER,
+  UserRole.TANKER_DRIVER,
   UserRole.CUSTOMER,
   UserRole.APARTMENT_ADMIN,
   UserRole.RESIDENT,
@@ -180,3 +188,58 @@ export const WalletTxnType = {
 export const walletTxnTypeSchema = z.enum([WalletTxnType.CREDIT, WalletTxnType.DEBIT]);
 
 export type WalletTxnType = z.infer<typeof walletTxnTypeSchema>;
+
+/** Water tanker module (ported from Tanker_Backend) */
+export const TankerVehicleStatus = {
+  AVAILABLE: "available",
+  ON_DELIVERY: "on_delivery",
+  MAINTENANCE: "maintenance",
+} as const;
+
+export const tankerVehicleStatusSchema = z.enum([
+  TankerVehicleStatus.AVAILABLE,
+  TankerVehicleStatus.ON_DELIVERY,
+  TankerVehicleStatus.MAINTENANCE,
+]);
+
+export type TankerVehicleStatus = z.infer<typeof tankerVehicleStatusSchema>;
+
+export const TankerRequestStatus = {
+  PENDING: "pending",
+  ACCEPTED: "accepted",
+  REJECTED: "rejected",
+  CANCELLED: "cancelled",
+} as const;
+
+export const tankerRequestStatusSchema = z.enum([
+  TankerRequestStatus.PENDING,
+  TankerRequestStatus.ACCEPTED,
+  TankerRequestStatus.REJECTED,
+  TankerRequestStatus.CANCELLED,
+]);
+
+export type TankerRequestStatus = z.infer<typeof tankerRequestStatusSchema>;
+
+export const TankerOrderStatus = {
+  SCHEDULED: "scheduled",
+  EN_ROUTE: "en_route",
+  WATER_FILLED: "water_filled",
+  ON_THE_WAY: "on_the_way",
+  AT_LOCATION: "at_location",
+  DELIVERING: "delivering",
+  DELIVERED: "delivered",
+  CANCELLED: "cancelled",
+} as const;
+
+export const tankerOrderStatusSchema = z.enum([
+  TankerOrderStatus.SCHEDULED,
+  TankerOrderStatus.EN_ROUTE,
+  TankerOrderStatus.WATER_FILLED,
+  TankerOrderStatus.ON_THE_WAY,
+  TankerOrderStatus.AT_LOCATION,
+  TankerOrderStatus.DELIVERING,
+  TankerOrderStatus.DELIVERED,
+  TankerOrderStatus.CANCELLED,
+]);
+
+export type TankerOrderStatus = z.infer<typeof tankerOrderStatusSchema>;

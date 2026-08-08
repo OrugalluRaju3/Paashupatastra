@@ -6,14 +6,17 @@ import {
   PrimaryGeneratedColumn,
 } from "typeorm";
 
-@Entity({ name: "otp_challenges" })
+@Entity({ name: "otps" })
 export class OtpChallengeEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id!: string;
+  @PrimaryGeneratedColumn()
+  id!: number;
 
   @Index()
   @Column({ type: "varchar", length: 10 })
   phone!: string;
+
+  @Column({ type: "varchar", length: 20, default: "parking" })
+  module!: "parking" | "tanker";
 
   @Column({ type: "varchar", length: 6 })
   otp!: string;

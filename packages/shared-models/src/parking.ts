@@ -8,9 +8,9 @@ import {
 } from "./enums";
 
 export const parkingSlotSchema = z.object({
-  id: z.string().uuid(),
-  apartmentId: z.string().uuid(),
-  ownerUserId: z.string().uuid(),
+  id: z.coerce.number().int().positive(),
+  apartmentId: z.coerce.number().int().positive(),
+  ownerUserId: z.coerce.number().int().positive(),
   title: z.string().min(2).max(120),
   description: z.string().max(1000).nullable(),
   blockName: z.string().min(1).max(40).nullable(),
@@ -29,7 +29,7 @@ export const parkingSlotSchema = z.object({
 export type ParkingSlot = z.infer<typeof parkingSlotSchema>;
 
 export const createParkingSlotSchema = z.object({
-  apartmentId: z.string().uuid(),
+  apartmentId: z.coerce.number().int().positive(),
   title: z.string().min(2).max(120),
   description: z.string().max(1000).optional(),
   blockName: z.string().min(1).max(40).optional(),
@@ -51,10 +51,10 @@ export const updateParkingSlotSchema = createParkingSlotSchema.partial().extend(
 export type UpdateParkingSlotInput = z.infer<typeof updateParkingSlotSchema>;
 
 export const parkingBookingSchema = z.object({
-  id: z.string().uuid(),
-  slotId: z.string().uuid(),
-  apartmentId: z.string().uuid(),
-  renterUserId: z.string().uuid(),
+  id: z.coerce.number().int().positive(),
+  slotId: z.coerce.number().int().positive(),
+  apartmentId: z.coerce.number().int().positive(),
+  renterUserId: z.coerce.number().int().positive(),
   status: bookingStatusSchema,
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
@@ -70,7 +70,7 @@ export const parkingBookingSchema = z.object({
 export type ParkingBooking = z.infer<typeof parkingBookingSchema>;
 
 export const createParkingBookingSchema = z.object({
-  slotId: z.string().uuid(),
+  slotId: z.coerce.number().int().positive(),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
 });
@@ -78,7 +78,7 @@ export const createParkingBookingSchema = z.object({
 export type CreateParkingBookingInput = z.infer<typeof createParkingBookingSchema>;
 
 export const parkingCheckInSchema = z.object({
-  bookingId: z.string().uuid(),
+  bookingId: z.coerce.number().int().positive(),
   code: z.string().min(4).max(32),
 });
 

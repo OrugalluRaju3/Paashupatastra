@@ -10,6 +10,7 @@ type ParkingStats = {
   fieldInProgress: number;
   managerReview: number;
   approved: number;
+  rejected?: number;
   bookingsTotal: number;
   bookingsActive: number;
 };
@@ -131,6 +132,7 @@ export function DashboardPage() {
         <KpiCard label="Field" value={parking?.fieldInProgress ?? "—"} hint="In progress" />
         <KpiCard label="Review" value={parking?.managerReview ?? "—"} hint="Manager queue" />
         <KpiCard label="Approved" value={parking?.approved ?? "—"} hint="Live slots" />
+        <KpiCard label="Rejected" value={parking?.rejected ?? "—"} hint="Declined" />
         <KpiCard label="Active bookings" value={parking?.bookingsActive ?? "—"} />
         <KpiCard
           label="Users"

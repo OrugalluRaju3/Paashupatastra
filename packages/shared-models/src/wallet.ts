@@ -14,7 +14,7 @@ export type BankAccountInput = z.infer<typeof bankAccountInputSchema>;
 export const withdrawWalletSchema = z.object({
   /** Amount in paise; minimum ₹1 */
   amountInPaise: z.number().int().positive().min(100),
-  bankAccountId: z.string().uuid().optional(),
+  bankAccountId: z.coerce.number().int().positive().optional(),
 });
 
 export type WithdrawWalletInput = z.infer<typeof withdrawWalletSchema>;

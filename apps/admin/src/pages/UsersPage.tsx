@@ -5,6 +5,7 @@ import { Pagination } from "../components/Pagination";
 import { RowActionsMenu } from "../components/RowActionsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
+import { isParkingSuperAdmin } from "../auth/types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 type User = {
@@ -14,14 +15,21 @@ type User = {
   email?: string | null;
   roles: string[];
   isActive: boolean;
+  deactivationReason?: string | null;
+  deactivatedAt?: string | null;
   city: string | null;
   state?: string | null;
   country?: string | null;
   pinCode?: string | null;
   dateOfBirth?: string | null;
   preferredLocation?: string | null;
+  reportingManagerId?: number | null;
+  reportingManagerName?: string | null;
+  reportingManagerPhone?: string | null;
   createdAt?: string;
 };
+
+type ManagerOption = { id: string; name: string | null; phone: string };
 
 type Paginated<T> = {
   items: T[];
@@ -53,6 +61,7 @@ const emptyForm = {
   country: "IN",
   dateOfBirth: "",
   preferredLocation: "",
+  reportingManagerId: "",
 };
 
 type FormState = typeof emptyForm;
@@ -63,9 +72,11 @@ function userToForm(u: User): FormState {
     ? "verification_manager"
     : u.roles.includes("field_executive")
       ? "field_executive"
-      : u.roles.includes("super_admin")
-        ? "super_admin"
-        : "";
+      : u.roles.includes("parking_super_admin")
+        ? "parking_super_admin"
+        : u.roles.includes("super_admin")
+          ? "super_admin"
+          : "";
   return {
     name: u.name ?? "",
     phone: u.phone,
@@ -77,39 +88,90 @@ function userToForm(u: User): FormState {
     country: u.country ?? "IN",
     dateOfBirth: u.dateOfBirth ? String(u.dateOfBirth).slice(0, 10) : "",
     preferredLocation: u.preferredLocation ?? "",
+    reportingManagerId: u.reportingManagerId != null ? String(u.reportingManagerId) : "",
   };
 }
 
 function isStaffUser(u: User) {
   return u.roles.some((r) =>
-    ["super_admin", "verification_manager", "field_executive"].includes(r),
+    ["parking_super_admin", "super_admin", "verification_manager", "field_executive"].includes(r),
   );
 }
 
-export function UsersPage() {
+export type UsersScope = "staff" | "parking" | "tanker";
+
+const SCOPE_COPY: Record<
+  UsersScope,
+  { title: string; subtitle: string; listTitle: string; empty: string }
+> = {
+  staff: {
+    title: "Staff users",
+    subtitle: "Invite managers and field executives. They receive email login credentials.",
+    listTitle: "Staff",
+    empty: "No staff users found.",
+  },
+  parking: {
+    title: "Parking users",
+    subtitle: "Parking customers and apartment owners (excludes tanker suppliers and drivers).",
+    listTitle: "Parking customers & owners",
+    empty: "No parking users found.",
+  },
+  tanker: {
+    title: "Tanker users",
+    subtitle: "Water tanker suppliers and drivers only.",
+    listTitle: "Suppliers & drivers",
+    empty: "No tanker users found.",
+  },
+};
+
+export function UsersPage({ scope = "staff" }: { scope?: UsersScope }) {
   const toast = useToast();
+  const copy = SCOPE_COPY[scope];
   const [data, setData] = useState<Paginated<User> | null>(null);
   const [page, setPage] = useState(1);
   const [q, setQ] = useState("");
   const search = useDebouncedValue(q.trim(), 350);
+  const [roleFilter, setRoleFilter] = useState("");
   const [invite, setInvite] = useState<InviteResult | null>(null);
   const [saving, setSaving] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [selected, setSelected] = useState<User | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [managers, setManagers] = useState<ManagerOption[]>([]);
 
   useEffect(() => {
     setPage(1);
-  }, [search]);
+    setRoleFilter("");
+    setQ("");
+  }, [scope]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, roleFilter]);
 
   const load = useCallback(async () => {
     try {
-      const list = await api.get<Paginated<User>>(`/users${qs({ page, limit: 10, q: search })}`);
+      const listPath =
+        scope === "tanker"
+          ? `/tanker/users${qs({
+              page,
+              limit: 10,
+              q: search,
+              role: roleFilter || undefined,
+            })}`
+          : `/users${qs({
+              page,
+              limit: 10,
+              q: search,
+              scope,
+              role: roleFilter || undefined,
+            })}`;
+      const list = await api.get<Paginated<User>>(listPath);
       setData(list);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load users");
     }
-  }, [page, search, toast]);
+  }, [page, roleFilter, scope, search, toast]);
 
   useEffect(() => {
     void load();
@@ -119,11 +181,30 @@ export function UsersPage() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  const loadManagers = useCallback(async () => {
+    if (scope !== "staff") return;
+    try {
+      const res = await api.get<Paginated<User>>(
+        `/users${qs({ role: "verification_manager", limit: 50, page: 1, scope: "staff" })}`,
+      );
+      setManagers(
+        res.items.map((m) => ({
+          id: String(m.id),
+          name: m.name,
+          phone: m.phone,
+        })),
+      );
+    } catch {
+      setManagers([]);
+    }
+  }, [scope]);
+
   function openInvite() {
     setInvite(null);
     setSelected(null);
     setForm(emptyForm);
     setModalMode("invite");
+    void loadManagers();
   }
 
   function openView(u: User) {
@@ -136,6 +217,7 @@ export function UsersPage() {
     setSelected(u);
     setForm(userToForm(u));
     setModalMode("edit");
+    void loadManagers();
   }
 
   async function createStaff(e: FormEvent) {
@@ -143,7 +225,7 @@ export function UsersPage() {
     setInvite(null);
     setSaving(true);
     try {
-      const res = await api.post<User & { invite: InviteResult }>("/users/staff", {
+      const payload: Record<string, unknown> = {
         name: form.name.trim(),
         phone: form.phone.trim(),
         email: form.email.trim(),
@@ -154,7 +236,11 @@ export function UsersPage() {
         pinCode: form.pinCode.trim(),
         dateOfBirth: form.dateOfBirth || null,
         preferredLocation: form.preferredLocation.trim() || null,
-      });
+      };
+      if (form.role === "field_executive" && form.reportingManagerId) {
+        payload.reportingManagerId = Number(form.reportingManagerId);
+      }
+      const res = await api.post<User & { invite: InviteResult }>("/users/staff", payload);
       setInvite(res.invite);
       if (res.invite.error) {
         toast.error(`Staff saved, but invite email failed: ${res.invite.error}`);
@@ -195,7 +281,7 @@ export function UsersPage() {
       if (
         isStaffUser(selected) &&
         (form.role === "field_executive" || form.role === "verification_manager") &&
-        !selected.roles.includes("super_admin")
+        !isParkingSuperAdmin(selected)
       ) {
         const roles = selected.roles.filter(
           (r) => r !== "field_executive" && r !== "verification_manager",
@@ -204,7 +290,14 @@ export function UsersPage() {
         payload.roles = roles;
       }
 
-      await api.patch(`/users/${selected.id}`, payload);
+      if (form.role === "field_executive" && form.reportingManagerId) {
+        payload.reportingManagerId = Number(form.reportingManagerId);
+      }
+
+      await api.patch(
+        scope === "tanker" ? `/tanker/users/${selected.id}` : `/users/${selected.id}`,
+        payload,
+      );
       toast.success("User updated");
       setModalMode(null);
       setSelected(null);
@@ -218,8 +311,15 @@ export function UsersPage() {
 
   async function toggleStatus(u: User) {
     const next = !u.isActive;
+    const confirmMsg = next
+      ? `Activate "${u.name ?? u.phone}"? They will be able to log in again.`
+      : `Deactivate "${u.name ?? u.phone}"? They will not be able to log in.`;
+    if (!window.confirm(confirmMsg)) return;
     try {
-      await api.patch(`/users/${u.id}/status`, { isActive: next });
+      await api.patch(
+        scope === "tanker" ? `/tanker/users/${u.id}/status` : `/users/${u.id}/status`,
+        { isActive: next },
+      );
       toast.success(next ? "User activated" : "User deactivated");
       await load();
     } catch (err) {
@@ -230,7 +330,7 @@ export function UsersPage() {
   async function onDelete(u: User) {
     if (!window.confirm(`Delete user "${u.name ?? u.phone}"? This cannot be undone.`)) return;
     try {
-      await api.delete(`/users/${u.id}`);
+      await api.delete(scope === "tanker" ? `/tanker/users/${u.id}` : `/users/${u.id}`);
       toast.success("User deleted");
       await load();
     } catch (err) {
@@ -252,15 +352,17 @@ export function UsersPage() {
     <>
       <div className="topbar">
         <div>
-          <h2>Users & staff</h2>
-          <p>Invite managers and field executives. They receive email login credentials.</p>
+          <h2>{copy.title}</h2>
+          <p>{copy.subtitle}</p>
         </div>
-        <button type="button" className="btn btn-primary" onClick={openInvite}>
-          + Invite manager / executive
-        </button>
+        {scope === "staff" ? (
+          <button type="button" className="btn btn-primary" onClick={openInvite}>
+            + Invite manager / executive
+          </button>
+        ) : null}
       </div>
 
-      {invite && !modalMode ? (
+      {invite && !modalMode && scope === "staff" ? (
         <div className="sidebar-user" style={{ marginBottom: "1rem", maxWidth: 520 }}>
           <strong>Last invite</strong>
           <div>Login path: {invite.loginPath}</div>
@@ -275,8 +377,43 @@ export function UsersPage() {
 
       <section className="panel">
         <div className="panel-head">
-          <h3>All users</h3>
+          <h3>{copy.listTitle}</h3>
           <div className="toolbar">
+            {scope === "parking" ? (
+              <select
+                aria-label="Filter parking role"
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+              >
+                <option value="">All parking roles</option>
+                <option value="customer">Customers</option>
+                <option value="parking_owner">Owners</option>
+              </select>
+            ) : null}
+            {scope === "tanker" ? (
+              <select
+                aria-label="Filter tanker role"
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+              >
+                <option value="">All tanker roles</option>
+                <option value="tanker_supplier">Suppliers</option>
+                <option value="tanker_driver">Drivers</option>
+              </select>
+            ) : null}
+            {scope === "staff" ? (
+              <select
+                aria-label="Filter staff role"
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+              >
+                <option value="">All staff roles</option>
+                <option value="parking_super_admin">Parking super admin</option>
+                <option value="super_admin">Super admin (legacy)</option>
+                <option value="verification_manager">Verification manager</option>
+                <option value="field_executive">Field executive</option>
+              </select>
+            ) : null}
             <input
               className="search"
               value={q}
@@ -294,6 +431,7 @@ export function UsersPage() {
                 <th>Email</th>
                 <th>Location</th>
                 <th>Roles</th>
+                {scope === "staff" ? <th>Reporting manager</th> : null}
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -318,8 +456,18 @@ export function UsersPage() {
                     ) : null}
                   </td>
                   <td>{u.roles.join(", ")}</td>
+                  {scope === "staff" ? (
+                    <td>{u.reportingManagerName ?? (u.roles.includes("field_executive") ? "—" : "")}</td>
+                  ) : null}
                   <td>
                     <StatusBadge status={u.isActive ? "active" : "inactive"} />
+                    {!u.isActive && u.deactivationReason ? (
+                      <div style={{ color: "var(--muted)", fontSize: "0.75rem", maxWidth: 220 }}>
+                        {u.deactivationReason.length > 120
+                          ? `${u.deactivationReason.slice(0, 120)}…`
+                          : u.deactivationReason}
+                      </div>
+                    ) : null}
                   </td>
                   <td>
                     <RowActionsMenu
@@ -353,8 +501,8 @@ export function UsersPage() {
               ))}
               {data && data.items.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="empty">
-                    No users found.
+                  <td colSpan={scope === "staff" ? 8 : 7} className="empty">
+                    {copy.empty}
                   </td>
                 </tr>
               ) : null}
@@ -438,10 +586,14 @@ export function UsersPage() {
                     id="staff-role"
                     value={form.role}
                     onChange={(e) => setField("role", e.target.value)}
-                    disabled={modalMode === "edit" && selected?.roles.includes("super_admin")}
+                    disabled={Boolean(modalMode === "edit" && selected && isParkingSuperAdmin(selected))}
                   >
-                    {modalMode === "edit" && selected?.roles.includes("super_admin") ? (
-                      <option value="super_admin">Super admin</option>
+                    {modalMode === "edit" && selected && isParkingSuperAdmin(selected) ? (
+                      selected.roles.includes("parking_super_admin") ? (
+                        <option value="parking_super_admin">Parking super admin</option>
+                      ) : (
+                        <option value="super_admin">Super admin (legacy)</option>
+                      )
                     ) : null}
                     <option value="field_executive">Field executive</option>
                     <option value="verification_manager">Verification manager</option>
@@ -477,6 +629,38 @@ export function UsersPage() {
                 />
               </div>
             </div>
+
+            {scope === "staff" &&
+            form.role === "field_executive" &&
+            (modalMode === "invite" || modalMode === "edit" || modalMode === "view") ? (
+              <div className="field">
+                <label htmlFor="staff-manager">Reporting manager</label>
+                {readOnly ? (
+                  <input
+                    value={
+                      selected?.reportingManagerName
+                        ? `${selected.reportingManagerName}${selected.reportingManagerPhone ? ` (${selected.reportingManagerPhone})` : ""}`
+                        : "—"
+                    }
+                    disabled
+                  />
+                ) : (
+                  <select
+                    id="staff-manager"
+                    value={form.reportingManagerId}
+                    onChange={(e) => setField("reportingManagerId", e.target.value)}
+                    required={modalMode === "invite"}
+                  >
+                    <option value="">Select manager</option>
+                    {managers.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name ?? m.phone} ({m.phone})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            ) : null}
 
             <div className="grid-2">
               <div className="field">
@@ -552,14 +736,34 @@ export function UsersPage() {
             </div>
 
             {modalMode === "view" && selected ? (
-              <div className="field">
-                <label>Status</label>
-                <input value={selected.isActive ? "Active" : "Inactive"} disabled />
-              </div>
+              <>
+                <div className="field">
+                  <label>Status</label>
+                  <input value={selected.isActive ? "Active" : "Inactive"} disabled />
+                </div>
+                {!selected.isActive && selected.deactivationReason ? (
+                  <div className="field" style={{ gridColumn: "1 / -1" }}>
+                    <label>Deactivation reason</label>
+                    <textarea value={selected.deactivationReason} disabled rows={3} />
+                  </div>
+                ) : null}
+              </>
             ) : null}
           </form>
         </Modal>
       ) : null}
     </>
   );
+}
+
+export function StaffUsersPage() {
+  return <UsersPage scope="staff" />;
+}
+
+export function ParkingUsersPage() {
+  return <UsersPage scope="parking" />;
+}
+
+export function TankerUsersPage() {
+  return <UsersPage scope="tanker" />;
 }

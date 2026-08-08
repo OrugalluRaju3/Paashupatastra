@@ -50,8 +50,10 @@ export type ParkingStats = {
   fieldInProgress?: number;
   managerReview?: number;
   approved?: number;
+  rejected?: number;
   bookingsTotal: number;
   bookingsActive: number;
+  bookingsCompleted?: number;
 };
 
 export type ParkingBooking = {
