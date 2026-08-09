@@ -2,7 +2,13 @@ const API = "/v1";
 
 function authHeaders(): Record<string, string> {
   const token = localStorage.getItem("paash_token") ?? localStorage.getItem("admin_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const module = localStorage.getItem("paash_module");
+  const intent = localStorage.getItem("paash_intent");
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (module === "parking" || module === "tanker") headers["x-auth-module"] = module;
+  if (intent) headers["x-auth-intent"] = intent;
+  return headers;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -50,13 +56,14 @@ export const api = {
   },
 };
 
-export function qs(params: Record<string, string | number | undefined>) {
+export function qs(params: Record<string, string | number | boolean | undefined>) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== "") search.set(key, String(value));
+    if (value === undefined || value === "") continue;
+    search.set(key, String(value));
   }
-  const text = search.toString();
-  return text ? `?${text}` : "";
+  const out = search.toString();
+  return out ? `?${out}` : "";
 }
 
 export function formatInrFromPaise(paise: number) {
@@ -65,4 +72,40 @@ export function formatInrFromPaise(paise: number) {
     currency: "INR",
     maximumFractionDigits: 0,
   }).format(paise / 100);
+}
+
+/** Download an authenticated API response as a file (e.g. invoice HTML). */
+export async function downloadAuthenticatedFile(path: string, fallbackFilename: string) {
+  const headers = new Headers(authHeaders());
+  const res = await fetch(`${API}${path}`, { headers });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message ?? `Download failed (${res.status})`);
+  }
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^"]+)"?/i.exec(disposition);
+  const filename = match?.[1] ?? fallbackFilename;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Open invoice HTML in a new tab for print / Save as PDF. */
+export async function openAuthenticatedHtml(path: string) {
+  const headers = new Headers(authHeaders());
+  const res = await fetch(`${API}${path}`, { headers });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message ?? `Open failed (${res.status})`);
+  }
+  const html = await res.text();
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+  window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }

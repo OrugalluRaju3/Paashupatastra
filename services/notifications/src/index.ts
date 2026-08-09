@@ -7,7 +7,7 @@ import {
   toIso,
   toIsoRequired,
 } from "@paashupatastra/database";
-import { createService, envInt, getUserIdFromHeaders, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
+import { createService, envInt, getAuthIntentFromHeaders, getAuthModuleFromHeaders, getUserIdFromHeaders, loadEnv, notificationAudienceForIntent, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import { paginationQuerySchema, sendEmailNotificationSchema } from "@paashupatastra/shared-models";
 import { z } from "zod";
 
@@ -16,6 +16,11 @@ const sendNotificationSchema = z.object({
   title: z.string().min(1).max(160),
   body: z.string().min(1).max(8000),
   channel: z.enum(["push", "sms", "email", "in_app"]).default("push"),
+  module: z.enum(["parking", "tanker"]).optional().nullable(),
+  audience: z
+    .enum(["customer", "supplier", "driver", "admin", "owner", "staff"])
+    .optional()
+    .nullable(),
   toEmail: z.string().email().optional(),
   toPhone: z.string().optional(),
   data: z.record(z.string()).optional(),
@@ -28,6 +33,8 @@ function serializeNotification(row: NotificationLogEntity) {
   return {
     id: row.id,
     userId: row.userId,
+    module: row.module,
+    audience: row.audience,
     channel: row.channel,
     title: row.title,
     body: row.body,
@@ -167,25 +174,58 @@ async function main() {
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
+        const authModule = getAuthModuleFromHeaders(request.headers as Record<string, unknown>);
+        const audience = notificationAudienceForIntent(
+          getAuthIntentFromHeaders(request.headers as Record<string, unknown>),
+        );
         const query = paginationQuerySchema.parse(request.query);
         const unreadOnly = (request.query as { unreadOnly?: string }).unreadOnly === "true";
 
         const qb = logRepo
           .createQueryBuilder("n")
           .where("n.user_id = :userId", { userId })
-          .andWhere("n.channel IN (:...channels)", { channels: ["in_app", "push", "sms"] })
+          // Inbox is in-app only (OTP sms/email must not clutter the bell)
+          .andWhere("n.channel = :channel", { channel: "in_app" })
           .orderBy("n.created_at", "DESC");
+
+        if (authModule) {
+          // Prefer explicit module; fall back for legacy rows before module was stored.
+          qb.andWhere(
+            "(n.module = :module OR (n.module IS NULL AND n.reference_type LIKE :refPrefix ESCAPE '\\'))",
+            {
+              module: authModule,
+              refPrefix: `${authModule}\\_%`,
+            },
+          );
+        }
+
+        if (audience) {
+          // Role inbox: customer/supplier/driver/admin only see their audience.
+          qb.andWhere("n.audience = :audience", { audience });
+        }
 
         if (unreadOnly) qb.andWhere("n.read_at IS NULL");
 
         const total = await qb.getCount();
         const rows = await qb.skip((query.page - 1) * query.limit).take(query.limit).getMany();
-        const unreadCount = await logRepo
+        const unreadQb = logRepo
           .createQueryBuilder("n")
           .where("n.user_id = :userId", { userId })
-          .andWhere("n.channel IN (:...channels)", { channels: ["in_app", "push", "sms"] })
-          .andWhere("n.read_at IS NULL")
-          .getCount();
+          .andWhere("n.channel = :channel", { channel: "in_app" })
+          .andWhere("n.read_at IS NULL");
+        if (authModule) {
+          unreadQb.andWhere(
+            "(n.module = :module OR (n.module IS NULL AND n.reference_type LIKE :refPrefix ESCAPE '\\'))",
+            {
+              module: authModule,
+              refPrefix: `${authModule}\\_%`,
+            },
+          );
+        }
+        if (audience) {
+          unreadQb.andWhere("n.audience = :audience", { audience });
+        }
+        const unreadCount = await unreadQb.getCount();
 
         return {
           items: rows.map(serializeNotification),
@@ -219,14 +259,30 @@ async function main() {
         if (!userId) {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
-        await logRepo
+        const authModule = getAuthModuleFromHeaders(request.headers as Record<string, unknown>);
+        const audience = notificationAudienceForIntent(
+          getAuthIntentFromHeaders(request.headers as Record<string, unknown>),
+        );
+        const qb = logRepo
           .createQueryBuilder()
           .update(NotificationLogEntity)
           .set({ readAt: new Date() })
           .where("user_id = :userId", { userId })
           .andWhere("read_at IS NULL")
-          .andWhere("channel IN (:...channels)", { channels: ["in_app", "push", "sms"] })
-          .execute();
+          .andWhere("channel = :channel", { channel: "in_app" });
+        if (authModule) {
+          qb.andWhere(
+            "(module = :module OR (module IS NULL AND reference_type LIKE :refPrefix ESCAPE '\\'))",
+            {
+              module: authModule,
+              refPrefix: `${authModule}\\_%`,
+            },
+          );
+        }
+        if (audience) {
+          qb.andWhere("audience = :audience", { audience });
+        }
+        await qb.execute();
         return { ok: true };
       });
 
@@ -268,10 +324,12 @@ async function main() {
         const row = await logRepo.save(
           logRepo.create({
             userId: body.userId ?? null,
+            module: body.module ?? null,
+            audience: body.audience ?? null,
             channel: body.channel,
             title: body.title,
             body: body.body,
-            status: "queued",
+            status: body.channel === "in_app" ? "unread" : "queued",
             referenceType: body.referenceType ?? null,
             referenceId: body.referenceId ?? null,
             readAt: null,

@@ -5,7 +5,16 @@ import { useAuth, getStoredModule } from "../auth/AuthContext";
 import { publicHomePath, type AuthModule, type PublicIntent } from "../auth/types";
 import { FileUploadField } from "../components/FileUploadField";
 import { GeoCoordFields } from "../components/GeoCoordFields";
+import {
+  TermsAcceptCheckbox,
+  recordTermsAcceptance,
+} from "../components/TermsAcceptCheckbox";
 import { useToast } from "../components/Toast";
+import {
+  DEFAULT_PARKING_VEHICLE_TYPES,
+  PARKING_VEHICLE_TYPE_OPTIONS,
+  toggleParkingVehicleType,
+} from "../lib/parkingVehicleTypes";
 
 type Mode = "login" | "signup";
 
@@ -33,6 +42,7 @@ const emptyOwner = {
   longitude: "",
   parkingSlotNumber: "",
   parkingType: "covered",
+  vehicleTypesAllowed: ["car", "bike", "auto"] as string[],
   availabilityStartTime: "06:00",
   availabilityEndTime: "22:00",
   availableDays: "all_days",
@@ -67,20 +77,14 @@ type VehicleEntry = {
   longitude: string;
 };
 
-const WATER_TYPE_OPTIONS = [
-  "Drinking Water",
-  "Borewell Water",
-  "Mineral Water",
-  "Soft Water",
-  "Raw Water",
-] as const;
+import { DEFAULT_TANKER_WATER_TYPE, TANKER_WATER_TYPE_OPTIONS } from "../lib/tankerWaterTypes";
 
 const emptyVehicleEntry = (): VehicleEntry => ({
   driverFirstName: "",
   driverLastName: "",
   driverEmail: "",
   driverMobile: "",
-  waterType: "Drinking Water",
+  waterType: DEFAULT_TANKER_WATER_TYPE,
   vehicleNumber: "",
   capacityLitres: "",
   amountInr: "",
@@ -125,6 +129,8 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
   const [owner, setOwner] = useState(emptyOwner);
   const [supplier, setSupplier] = useState(emptySupplier);
   const [vehicles, setVehicles] = useState<VehicleEntry[]>([emptyVehicleEntry()]);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [termsId, setTermsId] = useState<number | null>(null);
 
   useEffect(() => {
     if (module === "parking" && (intent === "supplier" || intent === "driver")) {
@@ -133,7 +139,22 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     if (module === "tanker" && intent === "owner") {
       setIntent("customer");
     }
+    setTermsAccepted(false);
+    setTermsId(null);
   }, [module, intent]);
+
+  function signupAudience(): "customer" | "parking_owner" | "tanker_supplier" | "tanker_driver" {
+    if (intent === "owner") return "parking_owner";
+    if (intent === "supplier") return "tanker_supplier";
+    if (intent === "driver") return "tanker_driver";
+    return "customer";
+  }
+
+  async function acceptTermsIfNeeded() {
+    if (termsId) {
+      await recordTermsAcceptance(termsId, "registration").catch(() => undefined);
+    }
+  }
 
   if (token && portal === "public") {
     const storedModule = getStoredModule() ?? module;
@@ -213,6 +234,10 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
 
   async function onVerify(e: FormEvent) {
     e.preventDefault();
+    if (mode === "signup" && !termsAccepted) {
+      toast.error("Please accept the Terms & Conditions to continue");
+      return;
+    }
     setLoading(true);
     try {
       if (mode === "signup" && intent === "customer") {
@@ -224,6 +249,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
           country: customer.country.trim() || "IN",
           pinCode: customer.pinCode.trim(),
         });
+        await acceptTermsIfNeeded();
         toast.success(
           module === "tanker" ? "Tanker customer account created" : "Customer account created successfully",
         );
@@ -315,6 +341,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
         });
 
         toast.success("Supplier registered successfully");
+        await acceptTermsIfNeeded();
         navigate(publicHomePath("supplier", module));
         return;
       }
@@ -328,6 +355,9 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
         const lng = Number(owner.longitude);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
           throw new Error("Enter valid latitude and longitude");
+        }
+        if (owner.vehicleTypesAllowed.length === 0) {
+          throw new Error("Select at least one vehicle type (car, bike, auto, or EV)");
         }
         if (!owner.governmentIdUrl.trim() || !owner.apartmentProofUrl.trim() || !owner.parkingSlotProofUrl.trim()) {
           throw new Error("Upload government ID, apartment proof, and parking slot proof");
@@ -369,7 +399,10 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
           longitude: lng,
           parkingSlotNumber: owner.parkingSlotNumber.trim(),
           parkingType: owner.parkingType,
-          vehicleTypesAllowed: ["car"],
+          vehicleTypesAllowed:
+            owner.vehicleTypesAllowed.length > 0
+              ? owner.vehicleTypesAllowed
+              : [...DEFAULT_PARKING_VEHICLE_TYPES],
           numberOfSlots: 1,
           availabilityStartTime: owner.availabilityStartTime,
           availabilityEndTime: owner.availabilityEndTime,
@@ -390,6 +423,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
         });
 
         toast.success("Owner registered. Application submitted for verification.");
+        await acceptTermsIfNeeded();
         navigate("/app/owner/listings");
         return;
       }
@@ -592,7 +626,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                       <input
                         id="s-alt-mobile"
                         inputMode="numeric"
-                        pattern="[6-9][0-9]{9}"
+                        pattern="[0-9]{10}"
                         maxLength={10}
                         placeholder="10-digit mobile"
                         value={supplier.alternateMobile}
@@ -768,7 +802,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                           <input
                             id={`v-mobile-${index}`}
                             inputMode="numeric"
-                            pattern="[6-9][0-9]{9}"
+                            pattern="[0-9]{10}"
                             maxLength={10}
                             required
                             placeholder="10-digit mobile"
@@ -790,7 +824,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                             value={vehicle.waterType}
                             onChange={(e) => updateVehicle(index, { waterType: e.target.value })}
                           >
-                            {WATER_TYPE_OPTIONS.map((option) => (
+                            {TANKER_WATER_TYPE_OPTIONS.map((option) => (
                               <option key={option} value={option}>
                                 {option}
                               </option>
@@ -1036,6 +1070,43 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                       </select>
                     </div>
                   </div>
+                  <fieldset className="field" style={{ border: 0, padding: 0, margin: "0.75rem 0 0" }}>
+                    <legend style={{ fontWeight: 600, marginBottom: "0.35rem" }}>
+                      Vehicles allowed
+                    </legend>
+                    <p style={{ margin: "0 0 0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                      Select all vehicle types this slot can accept (car, bike, auto, EV).
+                    </p>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1.25rem" }}>
+                      {PARKING_VEHICLE_TYPE_OPTIONS.map((opt) => {
+                        const checked = owner.vehicleTypesAllowed.includes(opt.value);
+                        return (
+                          <label
+                            key={opt.value}
+                            htmlFor={`o-vtype-${opt.value}`}
+                            style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                          >
+                            <input
+                              id={`o-vtype-${opt.value}`}
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) =>
+                                setOwner({
+                                  ...owner,
+                                  vehicleTypesAllowed: toggleParkingVehicleType(
+                                    owner.vehicleTypesAllowed,
+                                    opt.value,
+                                    e.target.checked,
+                                  ),
+                                })
+                              }
+                            />
+                            {opt.label}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </fieldset>
                   <div className="grid-2">
                     <div className="field">
                       <label htmlFor="o-start">Availability start time</label>
@@ -1207,7 +1278,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
               <input
                 id="phone"
                 inputMode="numeric"
-                pattern="[6-9][0-9]{9}"
+                pattern="[0-9]{10}"
                 maxLength={10}
                 required
                 placeholder="10-digit mobile"
@@ -1234,6 +1305,15 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
               {otpHint ? <p className="auth-hint">{otpHint}</p> : null}
               {debugOtp ? <p className="auth-hint">Debug OTP: {debugOtp}</p> : null}
             </div>
+            {mode === "signup" ? (
+              <TermsAcceptCheckbox
+                module={module}
+                audience={signupAudience()}
+                checked={termsAccepted}
+                onCheckedChange={setTermsAccepted}
+                onTermsLoaded={(t) => setTermsId(t?.id ?? null)}
+              />
+            ) : null}
             <button className="btn btn-primary" type="submit" disabled={loading || otp.length < 4}>
               {loading
                 ? "Please wait..."

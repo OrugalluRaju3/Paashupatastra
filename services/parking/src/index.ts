@@ -344,6 +344,7 @@ async function notify(
     await repo.save(
       repo.create({
         userId: input.userId,
+        module: "parking",
         channel: "in_app",
         title: input.title,
         body: input.body,

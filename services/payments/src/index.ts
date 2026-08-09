@@ -4,6 +4,7 @@ import {
   CommissionConfigEntity,
   ParkingBookingEntity,
   TankerOrderEntity,
+  TankerSupplierEntity,
   TankerUserEntity,
   UserEntity,
   WalletEntity,
@@ -14,6 +15,8 @@ import {
 import { createService, envInt, getRolesFromHeaders, getUserIdFromHeaders, loadEnv, parseEntityId, parseUserIdFromHeaders } from "@paashupatastra/service-kit";
 import {
   BookingStatus,
+  PaymentStatus,
+  TankerOrderStatus,
   UserRole,
   WalletTxnType,
   paginationQuerySchema,
@@ -180,7 +183,9 @@ async function getOrCreateWallet(repo: Repository<WalletEntity>, userId: number,
 
 function walletTypeForUser(headers: Record<string, unknown>) {
   const roles = getRolesFromHeaders(headers);
-  if (roles.includes(UserRole.PARKING_OWNER)) return "owner";
+  if (roles.includes(UserRole.PARKING_OWNER) || roles.includes(UserRole.TANKER_SUPPLIER)) {
+    return "owner";
+  }
   return "customer";
 }
 
@@ -193,6 +198,18 @@ function ownerShareFromBooking(booking: ParkingBookingEntity) {
     platformFee,
     tax,
     ownerShare: Math.max(0, total - platformFee - tax),
+  };
+}
+
+function supplierShareFromTankerOrder(order: TankerOrderEntity) {
+  const total = tankerOrderAmountInPaise(order);
+  const platformFee = order.platformFeeInPaise || 0;
+  const tax = order.taxInPaise || 0;
+  return {
+    total,
+    platformFee,
+    tax,
+    supplierShare: Math.max(0, total - platformFee - tax),
   };
 }
 
@@ -278,6 +295,149 @@ async function creditPlatformFromBooking(
   };
 }
 
+async function creditPlatformFromTankerOrder(
+  order: TankerOrderEntity,
+  walletRepo: Repository<WalletEntity>,
+  txnRepo: Repository<WalletTransactionEntity>,
+  notes: string,
+) {
+  const existing = await txnRepo.findOne({
+    where: {
+      referenceId: order.id,
+      purpose: "tanker_order_payment",
+      type: WalletTxnType.CREDIT,
+    },
+  });
+  if (existing) {
+    const platformWallet = await getPlatformWallet(walletRepo);
+    return {
+      ok: true as const,
+      alreadyPaid: true,
+      platformBalanceInPaise: Number(platformWallet.balanceInPaise),
+      tankerOrderId: order.id,
+      amountInPaise: Number(existing.amountInPaise),
+    };
+  }
+
+  const amount = tankerOrderAmountInPaise(order);
+  const platformWallet = await getPlatformWallet(walletRepo);
+  const newBalance = Number(platformWallet.balanceInPaise) + amount;
+  platformWallet.balanceInPaise = String(newBalance);
+  await walletRepo.save(platformWallet);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: platformWallet.id,
+      type: WalletTxnType.CREDIT,
+      amountInPaise: String(amount),
+      balanceAfterInPaise: String(newBalance),
+      purpose: "tanker_order_payment",
+      referenceId: order.id,
+      notes,
+    }),
+  );
+
+  const customerWallet = await getOrCreateWallet(walletRepo, order.customerUserId, "customer");
+  const customerBal = Number(customerWallet.balanceInPaise);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: customerWallet.id,
+      type: WalletTxnType.DEBIT,
+      amountInPaise: String(amount),
+      balanceAfterInPaise: String(customerBal),
+      purpose: "tanker_order_payment",
+      referenceId: order.id,
+      notes: "Paid for tanker order via Cashfree (held in platform wallet until delivery)",
+    }),
+  );
+
+  return {
+    ok: true as const,
+    alreadyPaid: false,
+    platformBalanceInPaise: newBalance,
+    tankerOrderId: order.id,
+    amountInPaise: amount,
+  };
+}
+
+async function settleTankerOrderToSupplier(
+  order: TankerOrderEntity,
+  supplierUserId: number,
+  walletRepo: Repository<WalletEntity>,
+  txnRepo: Repository<WalletTransactionEntity>,
+) {
+  const alreadySettled = await txnRepo.findOne({
+    where: {
+      referenceId: order.id,
+      purpose: "tanker_settlement",
+      type: WalletTxnType.CREDIT,
+    },
+  });
+  if (alreadySettled) {
+    const supplierWallet = await getOrCreateWallet(walletRepo, supplierUserId, "owner");
+    const platformWallet = await getPlatformWallet(walletRepo);
+    return {
+      ok: true as const,
+      alreadySettled: true,
+      supplierShareInPaise: Number(alreadySettled.amountInPaise),
+      platformFeeInPaise: order.platformFeeInPaise || 0,
+      taxInPaise: order.taxInPaise || 0,
+      supplierBalanceInPaise: Number(supplierWallet.balanceInPaise),
+      platformBalanceInPaise: Number(platformWallet.balanceInPaise),
+    };
+  }
+
+  const { platformFee, tax, supplierShare } = supplierShareFromTankerOrder(order);
+  const platformWallet = await getPlatformWallet(walletRepo);
+  const supplierWallet = await getOrCreateWallet(walletRepo, supplierUserId, "owner");
+
+  const platformBal = Number(platformWallet.balanceInPaise) - supplierShare;
+  if (platformBal < 0) {
+    throw Object.assign(new Error("Platform wallet does not hold enough to settle this tanker order"), {
+      statusCode: 409,
+      code: "INSUFFICIENT_PLATFORM_BALANCE",
+    });
+  }
+
+  platformWallet.balanceInPaise = String(platformBal);
+  await walletRepo.save(platformWallet);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: platformWallet.id,
+      type: WalletTxnType.DEBIT,
+      amountInPaise: String(supplierShare),
+      balanceAfterInPaise: String(platformBal),
+      purpose: "tanker_settlement",
+      referenceId: order.id,
+      notes: "Release supplier share from platform escrow after delivery",
+    }),
+  );
+
+  const supplierBal = Number(supplierWallet.balanceInPaise) + supplierShare;
+  supplierWallet.balanceInPaise = String(supplierBal);
+  await walletRepo.save(supplierWallet);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: supplierWallet.id,
+      type: WalletTxnType.CREDIT,
+      amountInPaise: String(supplierShare),
+      balanceAfterInPaise: String(supplierBal),
+      purpose: "tanker_settlement",
+      referenceId: order.id,
+      notes: `Supplier credit after delivery (platform fee ${platformFee} paise, tax ${tax} paise retained)`,
+    }),
+  );
+
+  return {
+    ok: true as const,
+    alreadySettled: false,
+    supplierShareInPaise: supplierShare,
+    platformFeeInPaise: platformFee,
+    taxInPaise: tax,
+    supplierBalanceInPaise: supplierBal,
+    platformBalanceInPaise: platformBal,
+  };
+}
+
 async function main() {
   loadEnv();
   const ds = await getDataSource();
@@ -287,6 +447,7 @@ async function main() {
   const bookingRepo = ds.getRepository(ParkingBookingEntity);
   const tankerOrderRepo = ds.getRepository(TankerOrderEntity);
   const tankerUserRepo = ds.getRepository(TankerUserEntity);
+  const tankerSupplierRepo = ds.getRepository(TankerSupplierEntity);
   const userRepo = ds.getRepository(UserEntity);
   const bankRepo = ds.getRepository(BankAccountEntity);
 
@@ -345,23 +506,58 @@ async function main() {
 
         let pendingSettlementInPaise = 0;
         if (walletType === "owner") {
-          const held = await bookingRepo.find({
-            where: {
-              ownerUserId: userId,
-              paymentStatus: "paid",
-              status: In([BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN]),
-            },
-          });
-          for (const b of held) {
-            const settled = await txnRepo.exist({
+          const roles = getRolesFromHeaders(headers);
+          if (roles.includes(UserRole.PARKING_OWNER)) {
+            const held = await bookingRepo.find({
               where: {
-                referenceId: b.id,
-                purpose: "settlement",
-                type: WalletTxnType.CREDIT,
+                ownerUserId: userId,
+                paymentStatus: "paid",
+                status: In([BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN]),
               },
             });
-            if (!settled) {
-              pendingSettlementInPaise += ownerShareFromBooking(b).ownerShare;
+            for (const b of held) {
+              const settled = await txnRepo.exist({
+                where: {
+                  referenceId: b.id,
+                  purpose: "settlement",
+                  type: WalletTxnType.CREDIT,
+                },
+              });
+              if (!settled) {
+                pendingSettlementInPaise += ownerShareFromBooking(b).ownerShare;
+              }
+            }
+          }
+
+          if (roles.includes(UserRole.TANKER_SUPPLIER)) {
+            const supplier = await tankerSupplierRepo.findOne({ where: { userId } });
+            if (supplier) {
+              const heldOrders = await tankerOrderRepo.find({
+                where: {
+                  supplierId: supplier.id,
+                  paymentStatus: PaymentStatus.PAID,
+                  status: In([
+                    TankerOrderStatus.SCHEDULED,
+                    TankerOrderStatus.EN_ROUTE,
+                    TankerOrderStatus.WATER_FILLED,
+                    TankerOrderStatus.ON_THE_WAY,
+                    TankerOrderStatus.AT_LOCATION,
+                    TankerOrderStatus.DELIVERING,
+                  ]),
+                },
+              });
+              for (const o of heldOrders) {
+                const settled = await txnRepo.exist({
+                  where: {
+                    referenceId: o.id,
+                    purpose: "tanker_settlement",
+                    type: WalletTxnType.CREDIT,
+                  },
+                });
+                if (!settled) {
+                  pendingSettlementInPaise += supplierShareFromTankerOrder(o).supplierShare;
+                }
+              }
             }
           }
         }
@@ -413,9 +609,12 @@ async function main() {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
         const roles = getRolesFromHeaders(headers);
-        if (!roles.includes(UserRole.PARKING_OWNER)) {
+        if (!roles.includes(UserRole.PARKING_OWNER) && !roles.includes(UserRole.TANKER_SUPPLIER)) {
           return reply.code(403).send({
-            error: { code: "FORBIDDEN", message: "Only parking owners can withdraw to bank" },
+            error: {
+              code: "FORBIDDEN",
+              message: "Only parking owners or tanker suppliers can withdraw to bank",
+            },
           });
         }
 
@@ -472,10 +671,12 @@ async function main() {
           /\/$/,
           "",
         );
-        const user = await userRepo.findOne({ where: { id: userId } });
+        const user =
+          (await userRepo.findOne({ where: { id: userId } })) ??
+          (await tankerUserRepo.findOne({ where: { id: userId } }));
         const title = "Wallet withdrawal initiated";
         const notifyBody = [
-          `Hello ${user?.name ?? "Owner"},`,
+          `Hello ${user?.name ?? (roles.includes(UserRole.TANKER_SUPPLIER) ? "Supplier" : "Owner")},`,
           "",
           `Your withdrawal of ₹${(amount / 100).toFixed(2)} has been initiated.`,
           `Bank: ${bank.bankName}`,
@@ -485,11 +686,14 @@ async function main() {
           "",
           "Funds are typically credited within 1–2 business days (sandbox: simulated instantly).",
         ].join("\n");
+        const isTankerSupplier = roles.includes(UserRole.TANKER_SUPPLIER);
         void fetch(`${notificationsUrl}/v1/notifications/send`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             userId,
+            module: isTankerSupplier ? "tanker" : "parking",
+            audience: isTankerSupplier ? "supplier" : "owner",
             channel: "in_app",
             title,
             body: `₹${(amount / 100).toFixed(2)} withdrawn to ${bank.bankName} (${masked}).`,
@@ -779,12 +983,22 @@ async function main() {
               });
             }
 
+            const fresh = await tankerOrderRepo.findOne({ where: { id: tankerOrder.id } });
+            const credited = await creditPlatformFromTankerOrder(
+              fresh ?? tankerOrder,
+              walletRepo,
+              txnRepo,
+              "Customer tanker payment collected via Cashfree to platform wallet",
+            );
+
             return {
               ok: true,
               tankerOrderId: tankerOrder.id,
               orderId: order.order_id ?? orderId,
               orderStatus: order.order_status,
               provider: "cashfree",
+              platformBalanceInPaise: credited.platformBalanceInPaise,
+              amountInPaise: credited.amountInPaise,
             };
           } catch (err) {
             return reply.code(502).send({
@@ -1010,6 +1224,94 @@ async function main() {
         };
       });
 
+      app.post("/v1/payments/tanker-orders/:tankerOrderId/collect", async (request, reply) => {
+        const tankerOrderId = parseEntityId(
+          (request.params as { tankerOrderId: string }).tankerOrderId,
+        );
+        const order = await tankerOrderRepo.findOne({ where: { id: tankerOrderId } });
+        if (!order) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Tanker order not found" },
+          });
+        }
+        if (order.paymentStatus !== PaymentStatus.PAID) {
+          return reply.code(400).send({
+            error: {
+              code: "NOT_PAID",
+              message: "Confirm tanker payment before collecting into platform wallet",
+            },
+          });
+        }
+
+        try {
+          const result = await creditPlatformFromTankerOrder(
+            order,
+            walletRepo,
+            txnRepo,
+            "Customer tanker payment collected to platform wallet",
+          );
+          return result;
+        } catch (err) {
+          const statusCode = (err as { statusCode?: number }).statusCode ?? 500;
+          return reply.code(statusCode).send({
+            error: {
+              code: "COLLECT_FAILED",
+              message: err instanceof Error ? err.message : "Collect failed",
+            },
+          });
+        }
+      });
+
+      app.post("/v1/payments/tanker-orders/:tankerOrderId/settle", async (request, reply) => {
+        const tankerOrderId = parseEntityId(
+          (request.params as { tankerOrderId: string }).tankerOrderId,
+        );
+        const order = await tankerOrderRepo.findOne({ where: { id: tankerOrderId } });
+        if (!order) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Tanker order not found" },
+          });
+        }
+        if (order.status !== TankerOrderStatus.DELIVERED) {
+          return reply.code(400).send({
+            error: {
+              code: "NOT_DELIVERED",
+              message: "Settle only after delivery is completed",
+            },
+          });
+        }
+        if (order.paymentStatus !== PaymentStatus.PAID) {
+          return reply.code(400).send({
+            error: { code: "NOT_PAID", message: "Cannot settle an unpaid tanker order" },
+          });
+        }
+
+        const supplier = await tankerSupplierRepo.findOne({ where: { id: order.supplierId } });
+        if (!supplier?.userId) {
+          return reply.code(400).send({
+            error: { code: "NO_SUPPLIER", message: "Tanker order has no supplier user" },
+          });
+        }
+
+        try {
+          const result = await settleTankerOrderToSupplier(
+            order,
+            supplier.userId,
+            walletRepo,
+            txnRepo,
+          );
+          return result;
+        } catch (err) {
+          const statusCode = (err as { statusCode?: number }).statusCode ?? 500;
+          return reply.code(statusCode).send({
+            error: {
+              code: (err as { code?: string }).code ?? "SETTLE_FAILED",
+              message: err instanceof Error ? err.message : "Settlement failed",
+            },
+          });
+        }
+      });
+
       app.post("/v1/payments/webhooks/cashfree", async (request, reply) => {
         const rawBody = JSON.stringify(request.body ?? {});
         const timestamp = String(request.headers["x-webhook-timestamp"] ?? "");
@@ -1091,6 +1393,22 @@ async function main() {
             );
           } catch (err) {
             app.log.error({ err }, "Failed to confirm tanker after Cashfree webhook");
+          }
+        }
+
+        if (paid) {
+          const fresh = await tankerOrderRepo.findOne({ where: { id: tankerOrder.id } });
+          if (fresh && fresh.paymentStatus === PaymentStatus.PAID) {
+            try {
+              await creditPlatformFromTankerOrder(
+                fresh,
+                walletRepo,
+                txnRepo,
+                "Customer tanker payment collected via Cashfree webhook to platform wallet",
+              );
+            } catch (err) {
+              app.log.error({ err }, "Failed to credit platform wallet for tanker order");
+            }
           }
         }
 

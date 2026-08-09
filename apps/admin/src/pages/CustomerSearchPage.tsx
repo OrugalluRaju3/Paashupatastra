@@ -3,9 +3,17 @@ import { useNavigate } from "react-router-dom";
 import { api, formatInrFromPaise, qs } from "../api";
 import { Modal } from "../components/Modal";
 import { StatusBadge } from "../components/StatusBadge";
+import {
+  TermsAcceptCheckbox,
+  recordTermsAcceptance,
+} from "../components/TermsAcceptCheckbox";
 import { useToast } from "../components/Toast";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { openCashfreeCheckout } from "../lib/cashfree";
+import {
+  DEFAULT_PARKING_VEHICLE_TYPES,
+  labelParkingVehicleType,
+} from "../lib/parkingVehicleTypes";
 
 type Listing = {
   id: string;
@@ -78,6 +86,8 @@ export function CustomerSearchPage() {
   const [step, setStep] = useState<"details" | "payment">("details");
   const [bookingId, setBookingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [termsId, setTermsId] = useState<number | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -105,7 +115,7 @@ export function CustomerSearchPage() {
     setVehicleNumber("");
     const allowed = item.vehicleTypesAllowed?.length
       ? item.vehicleTypesAllowed
-      : ["car", "bike", "ev"];
+      : [...DEFAULT_PARKING_VEHICLE_TYPES];
     setVehicleType(allowed[0] ?? "");
   }
 
@@ -133,6 +143,10 @@ export function CustomerSearchPage() {
   async function createBookingAndPay(e: FormEvent) {
     e.preventDefault();
     if (!selected) return;
+    if (!termsAccepted) {
+      toast.error("Please accept the Terms & Conditions to book");
+      return;
+    }
     if (new Date(endAt) <= new Date(startAt)) {
       toast.error("Check-out must be after check-in");
       return;
@@ -158,6 +172,11 @@ export function CustomerSearchPage() {
           vehicleType: vehicleType || undefined,
         },
       );
+      if (termsId) {
+        await recordTermsAcceptance(termsId, "booking", Number(created.booking.id)).catch(
+          () => undefined,
+        );
+      }
       setBookingId(created.booking.id);
       setStep("payment");
       toast.success("Booking created — complete payment");
@@ -265,6 +284,14 @@ export function CustomerSearchPage() {
                   </td>
                   <td>
                     {item.parkingSlotNumber} · {item.parkingType}
+                    <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                      {(item.vehicleTypesAllowed?.length
+                        ? item.vehicleTypesAllowed
+                        : DEFAULT_PARKING_VEHICLE_TYPES
+                      )
+                        .map(labelParkingVehicleType)
+                        .join(", ")}
+                    </div>
                   </td>
                   <td>
                     {item.availabilityStartTime && item.availabilityEndTime
@@ -387,10 +414,10 @@ export function CustomerSearchPage() {
                     </option>
                     {(selected.vehicleTypesAllowed?.length
                       ? selected.vehicleTypesAllowed
-                      : ["car", "bike", "ev"]
+                      : [...DEFAULT_PARKING_VEHICLE_TYPES]
                     ).map((t) => (
                       <option key={t} value={t}>
-                        {t.replaceAll("_", " ")}
+                        {labelParkingVehicleType(t)}
                       </option>
                     ))}
                   </select>
@@ -426,6 +453,13 @@ export function CustomerSearchPage() {
               ) : (
                 <p className="file-upload-hint">Get a quote or continue — total is calculated before payment.</p>
               )}
+              <TermsAcceptCheckbox
+                module="parking"
+                audience="customer"
+                checked={termsAccepted}
+                onCheckedChange={setTermsAccepted}
+                onTermsLoaded={(t) => setTermsId(t?.id ?? null)}
+              />
             </form>
           ) : (
             <div>

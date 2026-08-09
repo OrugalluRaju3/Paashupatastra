@@ -2,9 +2,12 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api, formatInrFromPaise } from "../api";
 import { KpiCard } from "../components/KpiCard";
 import { StatusBadge } from "../components/StatusBadge";
+import { ThreadChatModal } from "../components/BookingChatModal";
 import { useToast } from "../components/Toast";
-import { createTankerSocket } from "../lib/tankerSocket";
-import type { Socket } from "socket.io-client";
+import {
+  startTankerLocationShare,
+  type ShareLocationHandle,
+} from "../lib/shareTankerLocation";
 
 type Vehicle = {
   id: string;
@@ -25,6 +28,7 @@ type TankerOrder = {
   totalAmountInPaise?: number;
   status: string;
   paymentStatus: string;
+  otpVerified?: boolean;
   comments: string | null;
   createdAt: string;
 };
@@ -36,16 +40,15 @@ type DriverMe = {
   orders: TankerOrder[];
 };
 
-const ORDER_STATUSES = [
+const PRE_OTP_STATUSES = [
   "scheduled",
   "en_route",
   "water_filled",
   "on_the_way",
   "at_location",
-  "delivering",
-  "delivered",
-  "cancelled",
 ] as const;
+
+const POST_OTP_STATUSES = ["delivering", "delivered"] as const;
 
 export function TankerDriverPage() {
   const toast = useToast();
@@ -54,8 +57,8 @@ export function TankerDriverPage() {
   const [sharingOrderId, setSharingOrderId] = useState<string | null>(null);
   const [shareHint, setShareHint] = useState("");
   const [otpByOrder, setOtpByOrder] = useState<Record<string, string>>({});
-  const watchRef = useRef<number | null>(null);
-  const socketRef = useRef<Socket | null>(null);
+  const [chatOrder, setChatOrder] = useState<TankerOrder | null>(null);
+  const shareRef = useRef<ShareLocationHandle | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,65 +77,54 @@ export function TankerDriverPage() {
 
   useEffect(() => {
     return () => {
-      if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
+      shareRef.current?.stop();
+      shareRef.current = null;
     };
   }, []);
 
   function stopSharing() {
-    if (watchRef.current != null) {
-      navigator.geolocation.clearWatch(watchRef.current);
-      watchRef.current = null;
-    }
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
+    shareRef.current?.stop();
+    shareRef.current = null;
     setSharingOrderId(null);
     setShareHint("");
   }
 
   function startSharing(orderId: string) {
-    if (!navigator.geolocation) {
-      toast.error("Geolocation is not available on this device");
-      return;
-    }
-
     stopSharing();
     setSharingOrderId(orderId);
-    setShareHint("Starting location share…");
-
-    const socket = createTankerSocket();
-    socketRef.current = socket;
-    socket.connect();
-
-    watchRef.current = navigator.geolocation.watchPosition(
-      async (pos) => {
-        const latitude = pos.coords.latitude;
-        const longitude = pos.coords.longitude;
-        try {
-          await api.post(`/tanker/orders/${orderId}/location`, { latitude, longitude });
-          socket.emit("driverLocationUpdate", { orderId, latitude, longitude });
-          setShareHint(`Sharing · ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
-        } catch (err) {
-          setShareHint(err instanceof Error ? err.message : "Location update failed");
-        }
-      },
-      (err) => {
-        setShareHint(err.message || "Unable to read GPS");
-        toast.error(err.message || "Unable to read GPS");
-      },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
-    );
+    shareRef.current = startTankerLocationShare({
+      orderId,
+      onStatus: setShareHint,
+      onError: (message) => toast.error(message),
+      onFirstFix: () => toast.success("Location sharing started"),
+    });
   }
 
   async function updateStatus(orderId: string, status: string) {
+    const order = me?.orders.find((o) => o.id === orderId);
+    if (order && order.paymentStatus !== "paid") {
+      toast.error("Wait until the customer completes payment before updating status");
+      return;
+    }
+    if (
+      order &&
+      (status === "delivering" || status === "delivered") &&
+      !order.otpVerified
+    ) {
+      toast.error("Enter the customer OTP to start delivering");
+      return;
+    }
+    if (order && status === "delivered" && order.status !== "delivering") {
+      toast.error("Set status to delivering first (after OTP), then mark delivered");
+      return;
+    }
     try {
       await api.patch(`/tanker/orders/${orderId}/status`, { status });
-      toast.success(`Status → ${status.replaceAll("_", " ")}`);
+      toast.success(
+        status === "delivered"
+          ? "Delivered — supplier wallet will be credited"
+          : `Status → ${status.replaceAll("_", " ")}`,
+      );
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update status");
@@ -148,7 +140,7 @@ export function TankerDriverPage() {
     }
     try {
       await api.post(`/tanker/orders/${orderId}/verify-otp`, { otp });
-      toast.success("OTP verified");
+      toast.success("OTP verified — status set to delivering");
       setOtpByOrder((m) => ({ ...m, [orderId]: "" }));
       await load();
     } catch (err) {
@@ -280,18 +272,55 @@ export function TankerDriverPage() {
                       <select
                         aria-label="Update delivery status"
                         value={o.status}
+                        disabled={o.paymentStatus !== "paid"}
+                        title={
+                          o.paymentStatus !== "paid"
+                            ? "Available after customer payment"
+                            : !o.otpVerified
+                              ? "Use customer OTP to move to delivering"
+                              : "Update delivery status"
+                        }
                         onChange={(e) => void updateStatus(o.id, e.target.value)}
                       >
-                        {ORDER_STATUSES.map((s) => (
+                        {(o.otpVerified
+                          ? [...PRE_OTP_STATUSES, ...POST_OTP_STATUSES]
+                          : [...PRE_OTP_STATUSES]
+                        )
+                          .concat(
+                            !o.otpVerified &&
+                              (o.status === "delivering" || o.status === "delivered")
+                              ? [o.status as (typeof PRE_OTP_STATUSES)[number]]
+                              : [],
+                          )
+                          .filter((s, i, arr) => arr.indexOf(s) === i)
+                          .map((s) => (
                           <option key={s} value={s}>
                             {s.replaceAll("_", " ")}
                           </option>
                         ))}
                       </select>
+                      {o.paymentStatus !== "paid" ? (
+                        <div style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                          Status locked until payment
+                        </div>
+                      ) : !o.otpVerified ? (
+                        <div style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                          OTP required for delivering
+                        </div>
+                      ) : null}
                     </div>
                   </td>
                   <td>
                     <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                      {o.paymentStatus === "paid" ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setChatOrder(o)}
+                        >
+                          Chat
+                        </button>
+                      ) : null}
                       {sharingOrderId === o.id ? (
                         <button type="button" className="btn btn-ghost btn-sm" onClick={stopSharing}>
                           Stop share
@@ -305,14 +334,14 @@ export function TankerDriverPage() {
                           Share location
                         </button>
                       )}
-                      {o.paymentStatus === "paid" ? (
+                      {o.paymentStatus === "paid" && !o.otpVerified ? (
                         <form
                           onSubmit={(e) => void verifyOtp(e, o.id)}
-                          style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}
+                          style={{ display: "flex", gap: "0.35rem", alignItems: "center", flexWrap: "wrap" }}
                         >
                           <input
-                            aria-label="Delivery OTP"
-                            placeholder="OTP"
+                            aria-label="Customer delivery OTP"
+                            placeholder="Customer OTP"
                             maxLength={8}
                             value={otpByOrder[o.id] ?? ""}
                             onChange={(e) =>
@@ -321,12 +350,16 @@ export function TankerDriverPage() {
                                 [o.id]: e.target.value.replace(/\D/g, "").slice(0, 8),
                               }))
                             }
-                            style={{ width: "5rem" }}
+                            style={{ width: "6.5rem" }}
                           />
                           <button type="submit" className="btn btn-primary btn-sm">
-                            Verify
+                            Verify → Delivering
                           </button>
                         </form>
+                      ) : o.paymentStatus === "paid" && o.otpVerified ? (
+                        <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                          OTP verified · {o.status === "delivering" ? "Mark delivered when done" : "In progress"}
+                        </span>
                       ) : (
                         <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
                           Waiting for payment
@@ -360,6 +393,7 @@ export function TankerDriverPage() {
                   <th>When</th>
                   <th>Address</th>
                   <th>Status</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -370,12 +404,36 @@ export function TankerDriverPage() {
                     <td>
                       <StatusBadge status={o.status} />
                     </td>
+                    <td>
+                      {o.paymentStatus === "paid" ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setChatOrder(o)}
+                        >
+                          Chat
+                        </button>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </section>
+      ) : null}
+
+      {chatOrder ? (
+        <ThreadChatModal
+          messagesPath={`/tanker/orders/${chatOrder.id}/messages`}
+          title={`Chat · Order #${chatOrder.id}`}
+          peerLabel="customer"
+          intro="Chat with the customer about access, landmarks, and delivery. Available after payment."
+          closedLabel="Chat is closed after delivery is completed."
+          onClose={() => setChatOrder(null)}
+        />
       ) : null}
     </>
   );

@@ -17,11 +17,12 @@ type InboxResponse = {
 };
 
 export function NotificationBell() {
-  const { token, user } = useAuth();
+  const { token, user, intent } = useAuth();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
@@ -30,10 +31,11 @@ export function NotificationBell() {
       const res = await api.get<InboxResponse>(`/notifications/me${qs({ limit: 30 })}`);
       setItems(res.items);
       setUnreadCount(res.unreadCount);
-    } catch {
-      // keep prior list
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to load notifications");
     }
-  }, [token, user?.id]);
+  }, [token, user?.id, intent]);
 
   useEffect(() => {
     void load();
@@ -103,19 +105,29 @@ export function NotificationBell() {
             </button>
           </div>
           <div className="notif-list">
-            {items.map((n) => (
-              <button
-                key={n.id}
-                type="button"
-                className={`notif-item${n.isRead ? "" : " is-unread"}`}
-                onClick={() => void markRead(n.id)}
-              >
-                <div className="notif-item-title">{n.title}</div>
-                <div className="notif-item-body">{n.body}</div>
-                <div className="notif-item-meta">{new Date(n.createdAt).toLocaleString("en-IN")}</div>
-              </button>
-            ))}
-            {items.length === 0 ? <p className="notif-empty">No notifications yet.</p> : null}
+            {loadError ? (
+              <p className="notif-empty">
+                Could not load notifications ({loadError}).{" "}
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void load()}>
+                  Retry
+                </button>
+              </p>
+            ) : null}
+            {!loadError
+              ? items.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className={`notif-item${n.isRead ? "" : " is-unread"}`}
+                    onClick={() => void markRead(n.id)}
+                  >
+                    <div className="notif-item-title">{n.title}</div>
+                    <div className="notif-item-body">{n.body}</div>
+                    <div className="notif-item-meta">{new Date(n.createdAt).toLocaleString("en-IN")}</div>
+                  </button>
+                ))
+              : null}
+            {!loadError && items.length === 0 ? <p className="notif-empty">No notifications yet.</p> : null}
           </div>
         </div>
       ) : null}

@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0\.."
 
 echo.
-echo === Paashupatastra: free ports 3000-3007 ===
+echo === Paashupatastra: free ports 3000-3008 ===
 call "%~dp0\stop-services.cmd"
 timeout /t 1 >nul
 
@@ -16,6 +16,7 @@ start "paashupatastra-parking" cmd /k "cd /d ""%~dp0\.."" && npm run dev:parking
 start "paashupatastra-payments" cmd /k "cd /d ""%~dp0\.."" && npm run dev:payments"
 start "paashupatastra-notifications" cmd /k "cd /d ""%~dp0\.."" && npm run dev:notifications"
 start "paashupatastra-tanker" cmd /k "cd /d ""%~dp0\.."" && npm run dev:tanker"
+start "paashupatastra-content" cmd /k "cd /d ""%~dp0\.."" && npm run dev:content"
 
 echo Waiting for services before gateway...
 timeout /t 3 >nul

@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api, formatInrFromPaise, qs } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { BookingChatModal } from "../components/BookingChatModal";
+import { labelParkingVehicleType } from "../lib/parkingVehicleTypes";
 import { Modal } from "../components/Modal";
 import { ParkingNavigationMap } from "../components/ParkingNavigationMap";
 import { StatusBadge } from "../components/StatusBadge";
@@ -57,6 +58,9 @@ function formatDuration(minutes?: number) {
 
 function labelType(value?: string | null) {
   if (!value) return "—";
+  if (value === "car" || value === "bike" || value === "auto" || value === "ev") {
+    return labelParkingVehicleType(value);
+  }
   return value.replaceAll("_", " ");
 }
 

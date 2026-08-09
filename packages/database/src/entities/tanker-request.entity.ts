@@ -32,6 +32,9 @@ export class TankerRequestEntity {
   @Column({ name: "delivery_address", type: "varchar", length: 240 })
   deliveryAddress!: string;
 
+  @Column({ name: "preferred_delivery_at", type: "timestamptz", nullable: true })
+  preferredDeliveryAt!: Date | null;
+
   @Column({ type: "float8", nullable: true })
   latitude!: number | null;
 

@@ -238,16 +238,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         intent?: string;
       },
     ) => {
+      const purpose = opts?.purpose ?? "login";
+      const portal = opts?.portal;
+      const intent = opts?.intent?.trim();
+      if (purpose === "login" && (!portal || !intent)) {
+        throw new Error("Select a role to continue login");
+      }
+
+      const payload: Record<string, string> = {
+        phone,
+        module: opts?.module ?? "parking",
+        purpose,
+      };
+      if (opts?.email) payload.email = opts.email;
+      if (portal) payload.portal = portal;
+      if (intent) payload.intent = intent;
+
       return api.post<{ ok: boolean; debugOtp?: string; deliveredVia?: string[]; message?: string }>(
         "/auth/otp/request",
-        {
-          phone,
-          email: opts?.email,
-          module: opts?.module ?? "parking",
-          purpose: opts?.purpose ?? "login",
-          portal: opts?.portal,
-          intent: opts?.intent,
-        },
+        payload,
       );
     },
     [],
@@ -481,7 +490,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 
 
-        if (staffIntent === "parking_super_admin" && !isParkingSuperAdmin(loggedIn)) {
+        if (
+          (staffIntent === "parking_super_admin" || staffIntent === "super_admin") &&
+          !isParkingSuperAdmin(loggedIn)
+        ) {
 
           clearSession();
 

@@ -5,4 +5,5 @@ export * from "./parking";
 export * from "./parking-workflow";
 export * from "./tanker";
 export * from "./wallet";
+export * from "./content";
 export * from "./common";

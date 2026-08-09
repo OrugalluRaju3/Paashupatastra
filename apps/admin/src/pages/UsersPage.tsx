@@ -118,8 +118,8 @@ const SCOPE_COPY: Record<
   },
   tanker: {
     title: "Tanker users",
-    subtitle: "Water tanker suppliers and drivers only.",
-    listTitle: "Suppliers & drivers",
+    subtitle: "Water tanker customers, suppliers, and drivers.",
+    listTitle: "Customers, suppliers & drivers",
     empty: "No tanker users found.",
   },
 };
@@ -397,8 +397,10 @@ export function UsersPage({ scope = "staff" }: { scope?: UsersScope }) {
                 onChange={(e) => setRoleFilter(e.target.value)}
               >
                 <option value="">All tanker roles</option>
+                <option value="customer">Customers</option>
                 <option value="tanker_supplier">Suppliers</option>
                 <option value="tanker_driver">Drivers</option>
+                <option value="tanker_super_admin">Tanker admins</option>
               </select>
             ) : null}
             {scope === "staff" ? (
@@ -612,7 +614,7 @@ export function UsersPage({ scope = "staff" }: { scope?: UsersScope }) {
                   value={form.phone}
                   onChange={(e) => setField("phone", e.target.value.replace(/\D/g, "").slice(0, 10))}
                   required
-                  pattern="[6-9][0-9]{9}"
+                  pattern="[0-9]{10}"
                   placeholder="10-digit Indian mobile"
                   disabled={readOnly}
                 />

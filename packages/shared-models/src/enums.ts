@@ -129,10 +129,16 @@ export type ParkingType = z.infer<typeof parkingTypeSchema>;
 export const VehicleType = {
   CAR: "car",
   BIKE: "bike",
+  AUTO: "auto",
   EV: "ev",
 } as const;
 
-export const vehicleTypeSchema = z.enum([VehicleType.CAR, VehicleType.BIKE, VehicleType.EV]);
+export const vehicleTypeSchema = z.enum([
+  VehicleType.CAR,
+  VehicleType.BIKE,
+  VehicleType.AUTO,
+  VehicleType.EV,
+]);
 
 export type VehicleType = z.infer<typeof vehicleTypeSchema>;
 

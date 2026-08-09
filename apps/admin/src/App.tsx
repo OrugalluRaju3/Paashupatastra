@@ -22,6 +22,8 @@ import { TankerCustomerPage } from "./pages/TankerCustomerPage";
 import { TankerDriverPage } from "./pages/TankerDriverPage";
 import { TankerStaffPage } from "./pages/TankerStaffPage";
 import { TankerSupplierPage } from "./pages/TankerSupplierPage";
+import { ContentCmsPage } from "./pages/ContentCmsPage";
+import { HelpCenterPage } from "./pages/HelpCenterPage";
 import { ParkingUsersPage, StaffUsersPage, TankerUsersPage } from "./pages/UsersPage";
 import { VerificationPage } from "./pages/VerificationPage";
 import { WalletPage } from "./pages/WalletPage";
@@ -58,11 +60,18 @@ export default function App() {
                   <Route path="tanker" element={<TankerStaffPage />} />
                   <Route path="users/tanker" element={<TankerUsersPage />} />
                 </Route>
+                {/* Shared by parking + tanker staff — role check is inside the page */}
+                <Route path="content" element={<ContentCmsPage />} />
               </Route>
             </Route>
 
             <Route element={<RequireAuth portal="public" />}>
               <Route path="/app" element={<PublicLayout />}>
+                <Route path="help" element={<Navigate to="/app/help/faq" replace />} />
+                <Route path="help/faq" element={<HelpCenterPage section="faq" />} />
+                <Route path="help/privacy" element={<HelpCenterPage section="privacy" />} />
+                <Route path="help/terms" element={<HelpCenterPage section="terms" />} />
+                <Route path="help/support" element={<HelpCenterPage section="support" />} />
                 <Route element={<RequireModule module="parking" />}>
                   <Route path="customer" element={<CustomerHomePage />} />
                   <Route path="customer/search" element={<CustomerSearchPage />} />
@@ -80,13 +89,17 @@ export default function App() {
                   <Route path="owner/wallet" element={<WalletPage />} />
                 </Route>
                 <Route element={<RequireModule module="tanker" />}>
-                  <Route path="tanker" element={<TankerCustomerPage />} />
+                  <Route path="tanker" element={<TankerCustomerPage section="search" />} />
+                  <Route path="tanker/requests" element={<TankerCustomerPage section="requests" />} />
+                  <Route path="tanker/orders" element={<TankerCustomerPage section="orders" />} />
+                  <Route path="tanker/invoices" element={<TankerCustomerPage section="invoices" />} />
                   <Route path="tanker/payment/return" element={<PaymentReturnPage />} />
                   <Route path="supplier" element={<TankerSupplierPage />} />
                   <Route path="supplier/fleet" element={<TankerSupplierPage />} />
                   <Route path="supplier/requests" element={<TankerSupplierPage />} />
                   <Route path="supplier/orders" element={<TankerSupplierPage />} />
                   <Route path="supplier/invoices" element={<TankerSupplierPage />} />
+                  <Route path="supplier/wallet" element={<WalletPage />} />
                   <Route path="supplier/profile" element={<TankerSupplierPage />} />
                   <Route path="driver" element={<TankerDriverPage />} />
                 </Route>

@@ -62,15 +62,40 @@ export const createTankerRequestSchema = z.object({
   deliveryAddress: z.string().min(3).max(240),
   latitude: z.number().min(-90).max(90).optional().nullable(),
   longitude: z.number().min(-180).max(180).optional().nullable(),
+  /** Preferred delivery datetime (ISO). Used for supplier availability matching. */
+  preferredDeliveryAt: z.string().datetime().optional().nullable(),
 });
 
 export type CreateTankerRequestInput = z.infer<typeof createTankerRequestSchema>;
 
-export const decideTankerRequestSchema = z.object({
-  status: z.enum(["accepted", "rejected"]),
-  vehicleId: z.coerce.number().int().positive().optional(),
-  comments: z.string().max(500).optional().nullable(),
+export const searchTankerSuppliersSchema = z.object({
+  waterType: z.string().min(2).max(40).default("drinking"),
+  quantityLitres: z.coerce.number().int().positive(),
+  /** YYYY-MM-DD */
+  deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  /** HH:mm (24h) */
+  deliveryTime: z.string().regex(/^\d{2}:\d{2}$/),
+  lat: z.coerce.number().min(-90).max(90).optional(),
+  lng: z.coerce.number().min(-180).max(180).optional(),
+  radiusKm: z.coerce.number().positive().default(15),
 });
+
+export type SearchTankerSuppliersInput = z.infer<typeof searchTankerSuppliersSchema>;
+
+export const decideTankerRequestSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("accepted"),
+    vehicleId: z.coerce.number().int().positive({
+      message: "Select a vehicle to accept this request",
+    }),
+    comments: z.string().max(500).optional().nullable(),
+  }),
+  z.object({
+    status: z.literal("rejected"),
+    vehicleId: z.coerce.number().int().positive().optional(),
+    comments: z.string().max(500).optional().nullable(),
+  }),
+]);
 
 export type DecideTankerRequestInput = z.infer<typeof decideTankerRequestSchema>;
 
@@ -136,8 +161,8 @@ export const updateTankerPlatformFeeSchema = createTankerPlatformFeeSchema.parti
 export type UpdateTankerPlatformFeeInput = z.infer<typeof updateTankerPlatformFeeSchema>;
 
 export const updateDriverLocationSchema = z.object({
-  latitude: z.number().min(-90).max(90),
-  longitude: z.number().min(-180).max(180),
+  latitude: z.coerce.number().min(-90).max(90),
+  longitude: z.coerce.number().min(-180).max(180),
 });
 
 export type UpdateDriverLocationInput = z.infer<typeof updateDriverLocationSchema>;
@@ -155,10 +180,18 @@ export const confirmTankerPaymentSchema = z.object({
 
 export type ConfirmTankerPaymentInput = z.infer<typeof confirmTankerPaymentSchema>;
 
+export const tankerOrderChatMessageSchema = z.object({
+  body: z.string().trim().min(1).max(2000),
+});
+
+export type TankerOrderChatMessageInput = z.infer<typeof tankerOrderChatMessageSchema>;
+
 export type CreateTankerOrderInput = z.infer<typeof createTankerOrderSchema>;
 
 export const updateTankerOrderStatusSchema = z.object({
   status: tankerOrderStatusSchema,
+  /** Required when moving to delivering if OTP not yet verified. */
+  otp: z.string().min(4).max(8).optional(),
 });
 
 export type UpdateTankerOrderStatusInput = z.infer<typeof updateTankerOrderStatusSchema>;

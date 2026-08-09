@@ -49,12 +49,14 @@ const parkingOpsLinks: StaffNavLink[] = [
   },
   { to: "/staff/users/parking", label: "Parking users", roles: parkingSuperRoles },
   { to: "/staff/settings", label: "Commission", roles: parkingSuperRoles },
+  { to: "/staff/content", label: "Content", roles: parkingSuperRoles },
   { to: "/staff/parking", label: "Legacy slots", roles: parkingSuperRoles },
 ];
 
 const tankerOpsLinks: StaffNavLink[] = [
   { to: "/staff/tanker", label: "Water tanker", roles: ["tanker_super_admin"] },
   { to: "/staff/users/tanker", label: "Tanker users", roles: ["tanker_super_admin"] },
+  { to: "/staff/content", label: "Content", roles: ["tanker_super_admin"] },
 ];
 
 const staffOnlyLinks: StaffNavLink[] = [

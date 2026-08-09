@@ -52,6 +52,60 @@ function isParkingSuperAdmin(roles: string[]) {
   return hasAnyRole(roles, [UserRole.PARKING_SUPER_ADMIN, UserRole.SUPER_ADMIN]);
 }
 
+/** Legacy UI / DB role name maps to parking super-admin login intent. */
+function normalizeLoginIntent(intent?: string | null): string | undefined {
+  if (!intent) return undefined;
+  const trimmed = intent.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === UserRole.SUPER_ADMIN) return UserRole.PARKING_SUPER_ADMIN;
+  return trimmed;
+}
+
+type StoredLoginContext = {
+  portal: string;
+  intent: string;
+  expiresAt: number;
+};
+
+/** Remember portal/intent from OTP request so verify still works if the client omits them. */
+const loginContextByOtp = new Map<string, StoredLoginContext>();
+
+function loginContextKey(phone: string, module: string, otp: string) {
+  return `${module}:${phone}:${otp}`;
+}
+
+function rememberLoginContext(input: {
+  phone: string;
+  module: string;
+  otp: string;
+  portal?: string;
+  intent?: string;
+}) {
+  const portal = input.portal?.trim();
+  const intent = normalizeLoginIntent(input.intent);
+  if (!portal || !intent) return;
+  loginContextByOtp.set(loginContextKey(input.phone, input.module, input.otp), {
+    portal,
+    intent,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+}
+
+function peekLoginContext(phone: string, module: string, otp: string) {
+  const key = loginContextKey(phone, module, otp);
+  const stored = loginContextByOtp.get(key);
+  if (!stored) return undefined;
+  if (stored.expiresAt < Date.now()) {
+    loginContextByOtp.delete(key);
+    return undefined;
+  }
+  return stored;
+}
+
+function forgetLoginContext(phone: string, module: string, otp: string) {
+  loginContextByOtp.delete(loginContextKey(phone, module, otp));
+}
+
 type LoginGate =
   | { ok: true }
   | { ok: false; code: string; message: string; statusCode: number };
@@ -80,7 +134,10 @@ function gateLoginAccess(input: {
     };
   }
 
-  if (!input.portal || !input.intent) {
+  const portal = input.portal?.trim();
+  const intent = normalizeLoginIntent(input.intent);
+
+  if (!portal || !intent) {
     return {
       ok: false,
       statusCode: 400,
@@ -89,7 +146,7 @@ function gateLoginAccess(input: {
     };
   }
 
-  const { module, portal, intent, roles } = input;
+  const { module, roles } = input;
 
   if (portal === "staff") {
     if (module === "parking") {
@@ -102,7 +159,7 @@ function gateLoginAccess(input: {
             "This mobile is not registered as parking staff. Use Customer/Owner login, or ask Parking Super Admin to add a staff role.",
         };
       }
-      if (intent === "parking_super_admin" && !isParkingSuperAdmin(roles)) {
+      if (intent === UserRole.PARKING_SUPER_ADMIN && !isParkingSuperAdmin(roles)) {
         return {
           ok: false,
           statusCode: 403,
@@ -111,7 +168,7 @@ function gateLoginAccess(input: {
         };
       }
       if (
-        (intent === "verification_manager" || intent === "field_executive") &&
+        (intent === UserRole.VERIFICATION_MANAGER || intent === UserRole.FIELD_EXECUTIVE) &&
         !hasRole(roles, intent) &&
         !isParkingSuperAdmin(roles)
       ) {
@@ -133,7 +190,7 @@ function gateLoginAccess(input: {
         message: "This mobile is not registered as tanker staff.",
       };
     }
-    if (intent === "tanker_super_admin" && !hasRole(roles, UserRole.TANKER_SUPER_ADMIN)) {
+    if (intent === UserRole.TANKER_SUPER_ADMIN && !hasRole(roles, UserRole.TANKER_SUPER_ADMIN)) {
       return {
         ok: false,
         statusCode: 403,
@@ -352,6 +409,15 @@ async function main() {
             consumedAt: null,
           }),
         );
+        if (isLogin) {
+          rememberLoginContext({
+            phone: body.phone,
+            module: "tanker",
+            otp,
+            portal: body.portal,
+            intent: body.intent,
+          });
+        }
 
         const deliveredVia = await deliverOtp({
           phone: body.phone,
@@ -435,6 +501,15 @@ async function main() {
             consumedAt: null,
           }),
         );
+        if (isLogin) {
+          rememberLoginContext({
+            phone: body.phone,
+            module: "parking",
+            otp,
+            portal: body.portal,
+            intent: body.intent,
+          });
+        }
 
         const deliveredVia = await deliverOtp({
           phone: body.phone,
@@ -480,8 +555,11 @@ async function main() {
           });
         }
 
-        latest.consumedAt = new Date();
-        await otpRepo.save(latest);
+        const storedLogin = isLogin
+          ? peekLoginContext(body.phone, module, body.otp)
+          : undefined;
+        const portal = body.portal ?? storedLogin?.portal;
+        const intent = normalizeLoginIntent(body.intent) ?? storedLogin?.intent;
 
         if (module === "tanker") {
           let user = await tankerUserRepo.findOne({ where: { phone: body.phone } });
@@ -497,8 +575,8 @@ async function main() {
             }
             const gate = gateLoginAccess({
               module: "tanker",
-              portal: body.portal,
-              intent: body.intent,
+              portal,
+              intent,
               roles: user.roles ?? [],
               isActive: user.isActive,
             });
@@ -518,6 +596,10 @@ async function main() {
               }),
             );
           }
+
+          latest.consumedAt = new Date();
+          await otpRepo.save(latest);
+          forgetLoginContext(body.phone, module, body.otp);
 
           const accessToken = Buffer.from(
             JSON.stringify({ sub: String(user!.id), roles: user!.roles, module: "tanker" }),
@@ -542,8 +624,8 @@ async function main() {
           }
           const gate = gateLoginAccess({
             module: "parking",
-            portal: body.portal,
-            intent: body.intent,
+            portal,
+            intent,
             roles: user.roles ?? [],
             isActive: user.isActive,
             deactivationReason: user.deactivationReason,
@@ -564,6 +646,10 @@ async function main() {
             }),
           );
         }
+
+        latest.consumedAt = new Date();
+        await otpRepo.save(latest);
+        forgetLoginContext(body.phone, module, body.otp);
 
         const accessToken = Buffer.from(
           JSON.stringify({ sub: String(user!.id), roles: user!.roles, module: "parking" }),

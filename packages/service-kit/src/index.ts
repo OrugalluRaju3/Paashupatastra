@@ -92,6 +92,69 @@ export function getUserIdFromHeaders(headers: Record<string, unknown>): string |
   }
 }
 
+/** Read auth module (`parking` | `tanker`) from JWT or x-auth-module header. */
+export function getAuthModuleFromHeaders(headers: Record<string, unknown>): "parking" | "tanker" | null {
+  const explicit = headers["x-auth-module"];
+  if (explicit === "parking" || explicit === "tanker") return explicit;
+
+  const auth = headers.authorization;
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return null;
+  try {
+    const token = auth.slice("Bearer ".length);
+    const json = Buffer.from(token, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { module?: string };
+    if (payload.module === "parking" || payload.module === "tanker") return payload.module;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Active login intent / portal role for inbox scoping.
+ * Prefer `x-auth-intent`, then JWT `intent` if present.
+ */
+export function getAuthIntentFromHeaders(headers: Record<string, unknown>): string | null {
+  const explicit = headers["x-auth-intent"];
+  if (typeof explicit === "string" && explicit.trim()) return explicit.trim().toLowerCase();
+
+  const auth = headers.authorization;
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return null;
+  try {
+    const token = auth.slice("Bearer ".length);
+    const json = Buffer.from(token, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { intent?: string };
+    if (typeof payload.intent === "string" && payload.intent.trim()) {
+      return payload.intent.trim().toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Map login intent → notification audience bucket used for inbox filtering. */
+export function notificationAudienceForIntent(intent: string | null | undefined): string | null {
+  if (!intent) return null;
+  const value = intent.toLowerCase();
+  if (value === "customer" || value === "resident" || value === "visitor") return "customer";
+  if (value === "supplier" || value === "tanker_supplier") return "supplier";
+  if (value === "driver" || value === "tanker_driver") return "driver";
+  if (
+    value === "tanker_super_admin" ||
+    value === "tanker_admin" ||
+    value === "super_admin" ||
+    value === "admin"
+  ) {
+    return "admin";
+  }
+  if (value === "owner" || value === "parking_owner") return "owner";
+  if (value === "parking_super_admin" || value === "verification_manager" || value === "field_executive") {
+    return "staff";
+  }
+  return null;
+}
+
 /** Parse route/header/JWT id strings into numeric entity ids. */
 export function parseEntityId(value: string | number): number {
   const n = typeof value === "number" ? value : Number.parseInt(value, 10);

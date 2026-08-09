@@ -3,7 +3,7 @@ import { UserRole, userRoleSchema } from "./enums";
 
 export const phoneSchema = z
   .string()
-  .regex(/^[6-9]\d{9}$/, "Invalid Indian mobile number");
+  .regex(/^\d{10}$/, "Enter a valid 10-digit mobile number");
 
 export const userSchema = z.object({
   id: z.coerce.number().int().positive(),

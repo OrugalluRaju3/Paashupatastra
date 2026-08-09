@@ -74,6 +74,7 @@ async function notifyUser(input: {
         body: JSON.stringify({
           userId: input.userId,
           channel: "in_app",
+          module: "parking",
           title: input.title,
           body: input.body,
           referenceType: input.referenceType,

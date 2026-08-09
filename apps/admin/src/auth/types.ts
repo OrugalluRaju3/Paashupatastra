@@ -15,6 +15,7 @@ export type PublicIntent = "customer" | "owner" | "supplier" | "driver";
 
 export type StaffIntent =
   | "parking_super_admin"
+  | "super_admin"
   | "tanker_super_admin"
   | "verification_manager"
   | "field_executive";

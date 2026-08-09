@@ -6,25 +6,29 @@ import { useToast } from "./Toast";
 
 type ChatMessage = {
   id: number | string;
-  bookingId: number | string;
   senderUserId: number | string;
   senderName: string | null;
   body: string;
-  mine: boolean;
+  mine?: boolean;
   createdAt: string;
 };
 
 type Props = {
-  bookingId: string;
+  /** API path that supports GET/POST for messages, e.g. `/tanker/orders/12/messages` */
+  messagesPath: string;
   title?: string;
   peerLabel?: string;
+  intro?: string;
+  closedLabel?: string;
   onClose: () => void;
 };
 
-export function BookingChatModal({
-  bookingId,
-  title = "Booking chat",
+export function ThreadChatModal({
+  messagesPath,
+  title = "Chat",
   peerLabel = "other party",
+  intro,
+  closedLabel = "Chat is closed for this order.",
   onClose,
 }: Props) {
   const toast = useToast();
@@ -38,9 +42,7 @@ export function BookingChatModal({
 
   const load = useCallback(async () => {
     try {
-      const res = await api.get<{ items: ChatMessage[]; canSend: boolean }>(
-        `/parking/bookings/${bookingId}/messages`,
-      );
+      const res = await api.get<{ items: ChatMessage[]; canSend: boolean }>(messagesPath);
       setItems(Array.isArray(res.items) ? res.items : []);
       setCanSend(res.canSend !== false);
     } catch (err) {
@@ -48,7 +50,7 @@ export function BookingChatModal({
     } finally {
       setLoading(false);
     }
-  }, [bookingId, toast]);
+  }, [messagesPath, toast]);
 
   useEffect(() => {
     void load();
@@ -68,9 +70,7 @@ export function BookingChatModal({
     if (!body || !canSend) return;
     setSending(true);
     try {
-      const saved = await api.post<ChatMessage>(`/parking/bookings/${bookingId}/messages`, {
-        body,
-      });
+      const saved = await api.post<ChatMessage>(messagesPath, { body });
       setDraft("");
       setItems((prev) => {
         if (prev.some((m) => String(m.id) === String(saved.id))) return prev;
@@ -107,13 +107,13 @@ export function BookingChatModal({
             </button>
           </form>
         ) : (
-          <p className="booking-chat-closed">Chat is closed for this booking.</p>
+          <p className="booking-chat-closed">{closedLabel}</p>
         )
       }
     >
       <p className="booking-chat-intro">
-        Chat with the {peerLabel} about arrival, OTP, and parking access. Messages refresh
-        automatically.
+        {intro ??
+          `Chat with the ${peerLabel}. Messages refresh automatically.`}
       </p>
       <div className="booking-chat-thread" role="log" aria-live="polite">
         {loading ? <p className="loading">Loading messages…</p> : null}
@@ -142,5 +142,29 @@ export function BookingChatModal({
         <div ref={bottomRef} />
       </div>
     </Modal>
+  );
+}
+
+/** Parking booking chat (back-compat wrapper). */
+export function BookingChatModal({
+  bookingId,
+  title = "Booking chat",
+  peerLabel = "other party",
+  onClose,
+}: {
+  bookingId: string;
+  title?: string;
+  peerLabel?: string;
+  onClose: () => void;
+}) {
+  return (
+    <ThreadChatModal
+      messagesPath={`/parking/bookings/${bookingId}/messages`}
+      title={title}
+      peerLabel={peerLabel}
+      intro={`Chat with the ${peerLabel} about arrival, OTP, and parking access. Messages refresh automatically.`}
+      closedLabel="Chat is closed for this booking."
+      onClose={onClose}
+    />
   );
 }

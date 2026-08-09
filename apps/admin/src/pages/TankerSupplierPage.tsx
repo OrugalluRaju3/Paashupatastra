@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { api, formatInrFromPaise, qs } from "../api";
+import { api, downloadAuthenticatedFile, formatInrFromPaise, openAuthenticatedHtml, qs } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { FileUploadField } from "../components/FileUploadField";
 import { GeoCoordFields } from "../components/GeoCoordFields";
@@ -9,7 +9,11 @@ import { Modal } from "../components/Modal";
 import { Pagination } from "../components/Pagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
-import { createTankerSocket } from "../lib/tankerSocket";
+import {
+  startTankerLocationShare,
+  type ShareLocationHandle,
+} from "../lib/shareTankerLocation";
+import { DEFAULT_TANKER_WATER_TYPE, TANKER_WATER_TYPE_OPTIONS } from "../lib/tankerWaterTypes";
 import type { Paginated } from "../types";
 
 type Supplier = {
@@ -59,18 +63,21 @@ type TankerOrder = {
   id: string;
   waterType: string;
   capacityLitres: number;
+  vehicleId?: string | number | null;
   vehicleNumber: string | null;
   amountInPaise: number;
   deliveryAddress: string;
   status: string;
   paymentStatus: string;
   deliveryOtp: string | null;
+  otpVerified?: boolean;
   createdAt: string;
 };
 
 type Invoice = {
-  id: string;
-  orderId: string;
+  id: string | number;
+  invoiceNumber?: string;
+  orderId: string | number;
   amountInPaise: number;
   status: string;
   createdAt: string;
@@ -115,7 +122,7 @@ const emptyVehicle = {
   vehicleNumber: "",
   capacityLitres: "5000",
   amountInr: "",
-  waterType: "drinking",
+  waterType: DEFAULT_TANKER_WATER_TYPE,
   licenceFrontUrl: "",
   licenceBackUrl: "",
   tankerImageUrl: "",
@@ -327,6 +334,8 @@ export function TankerSupplierPage() {
   const [reqPage, setReqPage] = useState(1);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [acceptVehicleId, setAcceptVehicleId] = useState<Record<string, string>>({});
+  const [assignVehicleId, setAssignVehicleId] = useState<Record<string, string>>({});
+  const [assigningOrderId, setAssigningOrderId] = useState<string | null>(null);
 
   const [orders, setOrders] = useState<Paginated<TankerOrder> | null>(null);
   const [ordPage, setOrdPage] = useState(1);
@@ -336,17 +345,13 @@ export function TankerSupplierPage() {
 
   const [invoices, setInvoices] = useState<Paginated<Invoice> | null>(null);
   const [invPage, setInvPage] = useState(1);
+  const [downloadingInvoiceId, setDownloadingInvoiceId] = useState<string | null>(null);
 
-  const watchIdRef = useRef<number | null>(null);
-  const shareSocketRef = useRef<ReturnType<typeof createTankerSocket> | null>(null);
+  const shareRef = useRef<ShareLocationHandle | null>(null);
 
   const stopSharingLocation = useCallback(() => {
-    if (watchIdRef.current != null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
-    }
-    shareSocketRef.current?.disconnect();
-    shareSocketRef.current = null;
+    shareRef.current?.stop();
+    shareRef.current = null;
     setSharingOrderId(null);
     setLocationStatus("");
   }, []);
@@ -444,6 +449,25 @@ export function TankerSupplierPage() {
     }
   }, [invPage, supplier, toast]);
 
+  async function downloadInvoice(inv: Invoice, mode: "file" | "print") {
+    const id = String(inv.id);
+    setDownloadingInvoiceId(id);
+    try {
+      if (mode === "print") {
+        await openAuthenticatedHtml(`/tanker/invoices/${id}/download`);
+      } else {
+        await downloadAuthenticatedFile(
+          `/tanker/invoices/${id}/download`,
+          `${inv.invoiceNumber ?? `INV-TK-${id}`}.html`,
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to download invoice");
+    } finally {
+      setDownloadingInvoiceId(null);
+    }
+  }
+
   useEffect(() => {
     void loadProfile();
   }, [loadProfile]);
@@ -463,33 +487,13 @@ export function TankerSupplierPage() {
 
   function startSharingLocation(orderId: string) {
     stopSharingLocation();
-    if (!navigator.geolocation) {
-      toast.error("Geolocation not available");
-      return;
-    }
     setSharingOrderId(orderId);
-    setLocationStatus("Starting location sharing…");
-
-    const socket = createTankerSocket();
-    socket.connect();
-    shareSocketRef.current = socket;
-
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        setLocationStatus(`Sharing: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
-        void (async () => {
-          try {
-            await api.post(`/tanker/orders/${orderId}/location`, { latitude, longitude });
-            socket.emit("driverLocationUpdate", { orderId, latitude, longitude });
-          } catch (err) {
-            setLocationStatus(err instanceof Error ? err.message : "Failed to update location");
-          }
-        })();
-      },
-      (err) => setLocationStatus(err.message || "Location error"),
-      { enableHighAccuracy: true, maximumAge: 5000 },
-    );
+    shareRef.current = startTankerLocationShare({
+      orderId,
+      onStatus: setLocationStatus,
+      onError: (message) => toast.error(message),
+      onFirstFix: () => toast.success("Location sharing started"),
+    });
   }
 
   function buildProfilePayload() {
@@ -576,7 +580,7 @@ export function TankerSupplierPage() {
         vehicleNumber: vehicleForm.vehicleNumber.trim().toUpperCase(),
         capacityLitres: Math.round(capacity),
         amountInPaise: Math.round(amountInr * 100),
-        waterType: vehicleForm.waterType.trim() || "drinking",
+        waterType: vehicleForm.waterType.trim() || DEFAULT_TANKER_WATER_TYPE,
         licenceFrontUrl: vehicleForm.licenceFrontUrl.trim() || null,
         licenceBackUrl: vehicleForm.licenceBackUrl.trim() || null,
         tankerImageUrl: vehicleForm.tankerImageUrl.trim() || null,
@@ -606,13 +610,17 @@ export function TankerSupplierPage() {
   }
 
   async function onDecide(requestId: string, status: "accepted" | "rejected") {
+    if (status === "accepted" && !acceptVehicleId[requestId]) {
+      toast.error("Select a vehicle before accepting");
+      return;
+    }
     setDecidingId(requestId);
     try {
       await api.post(`/tanker/requests/${requestId}/decide`, {
         status,
-        vehicleId: status === "accepted" ? acceptVehicleId[requestId] || undefined : undefined,
+        vehicleId: status === "accepted" ? Number(acceptVehicleId[requestId]) : undefined,
       });
-      toast.success(status === "accepted" ? "Request accepted" : "Request rejected");
+      toast.success(status === "accepted" ? "Request accepted — driver notified" : "Request rejected");
       await Promise.all([loadRequests(), loadOrders(), loadFleet()]);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update request");
@@ -621,11 +629,76 @@ export function TankerSupplierPage() {
     }
   }
 
+  async function onAssignVehicle(orderId: string) {
+    const vehicleId = assignVehicleId[orderId];
+    if (!vehicleId) {
+      toast.error("Select a vehicle to assign");
+      return;
+    }
+    setAssigningOrderId(orderId);
+    try {
+      await api.post(`/tanker/orders/${orderId}/assign-vehicle`, { vehicleId: Number(vehicleId) });
+      toast.success("Vehicle assigned — driver notified");
+      setAssignVehicleId((prev) => {
+        const next = { ...prev };
+        delete next[orderId];
+        return next;
+      });
+      await Promise.all([loadOrders(), loadFleet()]);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to assign vehicle");
+    } finally {
+      setAssigningOrderId(null);
+    }
+  }
+
+  const [otpByOrder, setOtpByOrder] = useState<Record<string, string>>({});
+
   async function onUpdateOrderStatus(orderId: string, status: string) {
+    const order = orders?.items.find((o) => o.id === orderId);
+    if (
+      (status === "delivering" || status === "delivered") &&
+      order &&
+      !order.otpVerified
+    ) {
+      const otp = (otpByOrder[orderId] ?? "").trim();
+      if (otp.length < 4) {
+        toast.error("Enter customer OTP to set delivering");
+        return;
+      }
+      if (status === "delivered") {
+        toast.error("Verify OTP to set delivering first, then mark delivered");
+        return;
+      }
+      setUpdatingOrderId(orderId);
+      try {
+        await api.patch(`/tanker/orders/${orderId}/status`, { status: "delivering", otp });
+        toast.success("OTP verified — status set to delivering");
+        setOtpByOrder((m) => {
+          const next = { ...m };
+          delete next[orderId];
+          return next;
+        });
+        await loadOrders();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to update order");
+      } finally {
+        setUpdatingOrderId(null);
+      }
+      return;
+    }
+    if (status === "delivered" && order && order.status !== "delivering") {
+      toast.error("Set status to delivering first, then mark delivered");
+      return;
+    }
     setUpdatingOrderId(orderId);
     try {
       await api.patch(`/tanker/orders/${orderId}/status`, { status });
-      toast.success("Order status updated");
+      toast.success(
+        status === "delivered"
+          ? "Delivered — supplier wallet credited"
+          : "Order status updated",
+      );
       await loadOrders();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update order");
@@ -959,25 +1032,44 @@ export function TankerSupplierPage() {
                     </td>
                     <td>
                       {r.status === "pending" && !needsProfile ? (
-                        <div className="toolbar" style={{ flexWrap: "wrap", gap: "0.35rem" }}>
-                          <select
-                            value={acceptVehicleId[r.id] ?? ""}
-                            onChange={(e) =>
-                              setAcceptVehicleId((prev) => ({ ...prev, [r.id]: e.target.value }))
-                            }
-                            style={{ maxWidth: "10rem" }}
-                          >
-                            <option value="">Vehicle (optional)</option>
-                            {availableVehicles.map((v) => (
-                              <option key={v.id} value={v.id}>
-                                {v.vehicleNumber}
-                              </option>
-                            ))}
-                          </select>
+                        <div className="toolbar" style={{ flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                          <label style={{ display: "flex", flexDirection: "column", gap: "0.15rem", fontSize: "0.8rem" }}>
+                            <span>
+                              Vehicle <span style={{ color: "var(--danger, #b42318)" }}>*</span>
+                            </span>
+                            <select
+                              value={acceptVehicleId[r.id] ?? ""}
+                              onChange={(e) =>
+                                setAcceptVehicleId((prev) => ({ ...prev, [r.id]: e.target.value }))
+                              }
+                              style={{ maxWidth: "14rem" }}
+                              required
+                              aria-required="true"
+                              title="Vehicle is required to accept"
+                            >
+                              <option value="">Select vehicle (required)</option>
+                              {availableVehicles.map((v) => (
+                                <option key={v.id} value={v.id}>
+                                  {v.vehicleNumber} · {v.driverFullName}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
                           <button
                             type="button"
                             className="btn btn-primary btn-sm"
-                            disabled={decidingId === r.id}
+                            disabled={
+                              decidingId === r.id ||
+                              !acceptVehicleId[r.id] ||
+                              availableVehicles.length === 0
+                            }
+                            title={
+                              !acceptVehicleId[r.id]
+                                ? "Select a vehicle first"
+                                : availableVehicles.length === 0
+                                  ? "Add an available tanker first"
+                                  : "Accept and assign driver"
+                            }
                             onClick={() => void onDecide(r.id, "accepted")}
                           >
                             Accept
@@ -990,6 +1082,15 @@ export function TankerSupplierPage() {
                           >
                             Reject
                           </button>
+                          {availableVehicles.length === 0 ? (
+                            <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                              Add an available tanker first — accept needs a vehicle
+                            </span>
+                          ) : !acceptVehicleId[r.id] ? (
+                            <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                              Select a vehicle to enable Accept
+                            </span>
+                          ) : null}
                         </div>
                       ) : r.status === "pending" && needsProfile ? (
                         <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Profile required</span>
@@ -1055,18 +1156,59 @@ export function TankerSupplierPage() {
                       {formatInrFromPaise(o.amountInPaise)}
                       <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{o.paymentStatus}</div>
                     </td>
-                    <td>{o.deliveryOtp ?? "—"}</td>
+                    <td>
+                      {o.deliveryOtp ?? "—"}
+                      {o.paymentStatus === "paid" && !o.otpVerified && isActiveOrder(o.status) ? (
+                        <div style={{ marginTop: "0.35rem" }}>
+                          <input
+                            aria-label={`OTP for order ${o.id}`}
+                            placeholder="Customer OTP"
+                            maxLength={8}
+                            value={otpByOrder[o.id] ?? ""}
+                            onChange={(e) =>
+                              setOtpByOrder((m) => ({
+                                ...m,
+                                [o.id]: e.target.value.replace(/\D/g, "").slice(0, 8),
+                              }))
+                            }
+                            style={{ width: "6.5rem" }}
+                          />
+                        </div>
+                      ) : o.otpVerified ? (
+                        <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>OTP verified</div>
+                      ) : null}
+                    </td>
                     <td>
                       <div className="toolbar" style={{ gap: "0.35rem" }}>
                         <StatusBadge status={o.status} />
                         {isActiveOrder(o.status) && !needsProfile ? (
                           <select
                             value={o.status}
-                            disabled={updatingOrderId === o.id}
+                            disabled={updatingOrderId === o.id || o.paymentStatus !== "paid"}
+                            title={
+                              o.paymentStatus !== "paid"
+                                ? "Available after customer payment"
+                                : !o.otpVerified
+                                  ? "Enter OTP then choose delivering"
+                                  : undefined
+                            }
                             onChange={(e) => void onUpdateOrderStatus(o.id, e.target.value)}
                           >
-                            {ORDER_STATUSES.map((s) => (
-                              <option key={s} value={s}>
+                            {ORDER_STATUSES.filter((s) => {
+                              if (s === "cancelled") return true;
+                              if (s === "delivering" || s === "delivered") {
+                                return Boolean(o.otpVerified) || s === "delivering";
+                              }
+                              return true;
+                            }).map((s) => (
+                              <option
+                                key={s}
+                                value={s}
+                                disabled={
+                                  (s === "delivering" && !o.otpVerified && !(otpByOrder[o.id] ?? "").trim()) ||
+                                  (s === "delivered" && (!o.otpVerified || o.status !== "delivering"))
+                                }
+                              >
                                 {s.replaceAll("_", " ")}
                               </option>
                             ))}
@@ -1075,24 +1217,56 @@ export function TankerSupplierPage() {
                       </div>
                     </td>
                     <td>
-                      {isActiveOrder(o.status) && !needsProfile ? (
-                        sharingOrderId === o.id ? (
-                          <button type="button" className="btn btn-ghost btn-sm" onClick={stopSharingLocation}>
-                            Stop sharing
-                          </button>
+                      <div className="toolbar" style={{ flexWrap: "wrap", gap: "0.35rem" }}>
+                        {!o.vehicleId && isActiveOrder(o.status) && !needsProfile ? (
+                          <>
+                            <select
+                              value={assignVehicleId[o.id] ?? ""}
+                              onChange={(e) =>
+                                setAssignVehicleId((prev) => ({ ...prev, [o.id]: e.target.value }))
+                              }
+                              style={{ maxWidth: "11rem" }}
+                            >
+                              <option value="">Assign vehicle</option>
+                              {availableVehicles.map((v) => (
+                                <option key={v.id} value={v.id}>
+                                  {v.vehicleNumber} · {v.driverFullName}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              disabled={
+                                assigningOrderId === o.id ||
+                                !assignVehicleId[o.id] ||
+                                availableVehicles.length === 0
+                              }
+                              onClick={() => void onAssignVehicle(o.id)}
+                            >
+                              Assign & notify
+                            </button>
+                          </>
+                        ) : null}
+                        {isActiveOrder(o.status) && !needsProfile ? (
+                          sharingOrderId === o.id ? (
+                            <button type="button" className="btn btn-ghost btn-sm" onClick={stopSharingLocation}>
+                              Stop sharing
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              disabled={sharingOrderId != null || !o.vehicleId}
+                              onClick={() => startSharingLocation(o.id)}
+                            >
+                              Share location
+                            </button>
+                          )
                         ) : (
-                          <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            disabled={sharingOrderId != null}
-                            onClick={() => startSharingLocation(o.id)}
-                          >
-                            Share location
-                          </button>
-                        )
-                      ) : (
-                        "—"
-                      )}
+                          !o.vehicleId ? null : "—"
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1121,34 +1295,64 @@ export function TankerSupplierPage() {
         <section className="panel">
           <div className="panel-head">
             <h3>Invoices</h3>
+            <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.9rem" }}>
+              Generated after customer payment (and ensured on delivery). Download or print/PDF.
+            </p>
           </div>
           <div className="table-wrap">
             <table className="data">
               <thead>
                 <tr>
+                  <th>Invoice</th>
                   <th>Date</th>
                   <th>Order</th>
                   <th>Amount</th>
                   <th>Status</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
                 {(invoices?.items ?? []).map((inv) => (
-                  <tr key={inv.id}>
+                  <tr key={String(inv.id)}>
+                    <td>
+                      <code>{inv.invoiceNumber ?? `INV-TK-${inv.id}`}</code>
+                    </td>
                     <td>{new Date(inv.createdAt).toLocaleString("en-IN")}</td>
                     <td>
-                      <code>{inv.orderId.slice(0, 8)}…</code>
+                      <code>#{inv.orderId}</code>
                     </td>
                     <td>{formatInrFromPaise(inv.amountInPaise)}</td>
                     <td>
                       <StatusBadge status={inv.status} />
                     </td>
+                    <td>
+                      <div className="action-stack">
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          disabled={downloadingInvoiceId === String(inv.id)}
+                          onClick={() => void downloadInvoice(inv, "file")}
+                        >
+                          {downloadingInvoiceId === String(inv.id) ? "…" : "Download"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled={downloadingInvoiceId === String(inv.id)}
+                          onClick={() => void downloadInvoice(inv, "print")}
+                        >
+                          Print / PDF
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
                 {(invoices?.items.length ?? 0) === 0 ? (
                   <tr>
-                    <td colSpan={4} className="empty">
-                      {needsProfile ? "Invoices appear after your first paid order." : "No invoices yet."}
+                    <td colSpan={6} className="empty">
+                      {needsProfile
+                        ? "Invoices appear after your first paid order."
+                        : "No invoices yet. They appear after the customer pays."}
                     </td>
                   </tr>
                 ) : null}
@@ -1231,11 +1435,15 @@ export function TankerSupplierPage() {
                 <select
                   id="v-water"
                   value={vehicleForm.waterType}
-                  onChange={(e) => setVehicleForm((f) => ({ ...f, waterType: e.target.value }))}
+                  onChange={(e) =>
+                    setVehicleForm((f) => ({ ...f, waterType: e.target.value as typeof f.waterType }))
+                  }
                 >
-                  <option value="drinking">Drinking</option>
-                  <option value="bore">Bore</option>
-                  <option value="raw">Raw</option>
+                  {TANKER_WATER_TYPE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>

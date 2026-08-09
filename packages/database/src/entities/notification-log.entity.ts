@@ -15,6 +15,19 @@ export class NotificationLogEntity {
   @Column({ name: "user_id", type: "int", nullable: true })
   userId!: number | null;
 
+  /** Separates parking vs tanker user id namespaces in the shared inbox. */
+  @Index()
+  @Column({ type: "varchar", length: 20, nullable: true })
+  module!: string | null;
+
+  /**
+   * Role inbox scope within a module (e.g. tanker customer vs supplier vs driver).
+   * Null = legacy / unscoped.
+   */
+  @Index()
+  @Column({ type: "varchar", length: 20, nullable: true })
+  audience!: string | null;
+
   @Column({ type: "varchar", length: 20 })
   channel!: string;
 

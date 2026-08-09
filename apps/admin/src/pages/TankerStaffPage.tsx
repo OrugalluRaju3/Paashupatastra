@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
-import { api, formatInrFromPaise, qs } from "../api";
+import { api, downloadAuthenticatedFile, formatInrFromPaise, openAuthenticatedHtml, qs } from "../api";
 
 import { KpiCard } from "../components/KpiCard";
 
@@ -150,9 +150,11 @@ type TankerOrder = {
 
 type Invoice = {
 
-  id: string;
+  id: string | number;
 
-  orderId: string;
+  invoiceNumber?: string;
+
+  orderId: string | number;
 
   amountInPaise: number;
 
@@ -225,15 +227,16 @@ type StaffTab = "suppliers" | "vehicles" | "orders" | "requests" | "invoices" | 
 
 
 type CustomerReport = {
-
-  customerUserId: string;
-
+  customerUserId: string | number;
+  name?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  isActive?: boolean;
+  city?: string | null;
+  createdAt?: string | null;
   ordersCount: number;
-
-  lastOrderAt: string;
-
+  lastOrderAt: string | null;
   totalPaidInPaise: number;
-
 };
 
 
@@ -309,6 +312,8 @@ export function TankerStaffPage() {
   const [requests, setRequests] = useState<Paginated<TankerRequest> | null>(null);
 
   const [invoices, setInvoices] = useState<Paginated<Invoice> | null>(null);
+
+  const [downloadingInvoiceId, setDownloadingInvoiceId] = useState<string | null>(null);
 
   const [customers, setCustomers] = useState<Paginated<CustomerReport> | null>(null);
 
@@ -1208,6 +1213,8 @@ export function TankerStaffPage() {
 
                   <th>Created</th>
 
+                  <th />
+
                 </tr>
 
               </thead>
@@ -1216,11 +1223,11 @@ export function TankerStaffPage() {
 
                 {(invoices?.items ?? []).map((inv) => (
 
-                  <tr key={inv.id}>
+                  <tr key={String(inv.id)}>
 
                     <td>
 
-                      <code>#{String(inv.id)}</code>
+                      <code>{inv.invoiceNumber ?? `INV-TK-${inv.id}`}</code>
 
                     </td>
 
@@ -1240,6 +1247,84 @@ export function TankerStaffPage() {
 
                     <td>{new Date(inv.createdAt).toLocaleString("en-IN")}</td>
 
+                    <td>
+
+                      <div className="action-stack">
+
+                        <button
+
+                          type="button"
+
+                          className="btn btn-primary btn-sm"
+
+                          disabled={downloadingInvoiceId === String(inv.id)}
+
+                          onClick={() => {
+
+                            const id = String(inv.id);
+
+                            setDownloadingInvoiceId(id);
+
+                            void downloadAuthenticatedFile(
+
+                              `/tanker/invoices/${id}/download`,
+
+                              `${inv.invoiceNumber ?? `INV-TK-${id}`}.html`,
+
+                            )
+
+                              .catch((err) =>
+
+                                toast.error(err instanceof Error ? err.message : "Download failed"),
+
+                              )
+
+                              .finally(() => setDownloadingInvoiceId(null));
+
+                          }}
+
+                        >
+
+                          Download
+
+                        </button>
+
+                        <button
+
+                          type="button"
+
+                          className="btn btn-ghost btn-sm"
+
+                          disabled={downloadingInvoiceId === String(inv.id)}
+
+                          onClick={() => {
+
+                            const id = String(inv.id);
+
+                            setDownloadingInvoiceId(id);
+
+                            void openAuthenticatedHtml(`/tanker/invoices/${id}/download`)
+
+                              .catch((err) =>
+
+                                toast.error(err instanceof Error ? err.message : "Open failed"),
+
+                              )
+
+                              .finally(() => setDownloadingInvoiceId(null));
+
+                          }}
+
+                        >
+
+                          Print / PDF
+
+                        </button>
+
+                      </div>
+
+                    </td>
+
                   </tr>
 
                 ))}
@@ -1248,7 +1333,7 @@ export function TankerStaffPage() {
 
                   <tr>
 
-                    <td colSpan={5} className="empty">
+                    <td colSpan={6} className="empty">
 
                       No invoices yet.
 
@@ -1269,69 +1354,51 @@ export function TankerStaffPage() {
 
 
         {tab === "customers" ? (
-
           <div className="table-wrap">
-
             <table className="data">
-
               <thead>
-
                 <tr>
-
                   <th>Customer</th>
-
+                  <th>Mobile</th>
+                  <th>Email</th>
                   <th>Orders</th>
-
                   <th>Total paid</th>
-
                   <th>Last order</th>
-
+                  <th>Status</th>
                 </tr>
-
               </thead>
-
               <tbody>
-
                 {(customers?.items ?? []).map((c) => (
-
-                  <tr key={c.customerUserId}>
-
+                  <tr key={String(c.customerUserId)}>
                     <td>
-
-                      <code>#{String(c.customerUserId)}</code>
-
+                      <strong>{c.name ?? "—"}</strong>
+                      <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                        #{String(c.customerUserId)}
+                        {c.city ? ` · ${c.city}` : ""}
+                      </div>
                     </td>
-
+                    <td className="mono">{c.phone ?? "—"}</td>
+                    <td>{c.email ?? "—"}</td>
                     <td>{c.ordersCount}</td>
-
                     <td>{formatInrFromPaise(c.totalPaidInPaise)}</td>
-
-                    <td>{new Date(c.lastOrderAt).toLocaleString("en-IN")}</td>
-
-                  </tr>
-
-                ))}
-
-                {(customers?.items.length ?? 0) === 0 ? (
-
-                  <tr>
-
-                    <td colSpan={4} className="empty">
-
-                      No customer orders yet.
-
+                    <td>
+                      {c.lastOrderAt ? new Date(c.lastOrderAt).toLocaleString("en-IN") : "—"}
                     </td>
-
+                    <td>
+                      <StatusBadge status={c.isActive === false ? "inactive" : "active"} />
+                    </td>
                   </tr>
-
+                ))}
+                {(customers?.items.length ?? 0) === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="empty">
+                      No customers registered yet.
+                    </td>
+                  </tr>
                 ) : null}
-
               </tbody>
-
             </table>
-
           </div>
-
         ) : null}
 
 

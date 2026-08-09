@@ -21,9 +21,16 @@ import { TankerVehicleEntity } from "./entities/tanker-vehicle.entity";
 import { TankerRequestEntity } from "./entities/tanker-request.entity";
 import { TankerOrderEntity } from "./entities/tanker-order.entity";
 import { TankerInvoiceEntity } from "./entities/tanker-invoice.entity";
+import { TankerOrderMessageEntity } from "./entities/tanker-order-message.entity";
 import { TankerPromoCodeEntity } from "./entities/tanker-promo-code.entity";
 import { TankerTaxSettingEntity } from "./entities/tanker-tax-setting.entity";
 import { TankerPlatformFeeSettingEntity } from "./entities/tanker-platform-fee-setting.entity";
+import { PrivacyPolicyEntity } from "./entities/privacy-policy.entity";
+import { TermsDocumentEntity } from "./entities/terms-document.entity";
+import { TermsAcceptanceEntity } from "./entities/terms-acceptance.entity";
+import { FaqEntity } from "./entities/faq.entity";
+import { SupportContactSettingsEntity } from "./entities/support-contact-settings.entity";
+import { AnnouncementEntity } from "./entities/announcement.entity";
 
 export const allEntities = [
   UserEntity,
@@ -47,9 +54,16 @@ export const allEntities = [
   TankerRequestEntity,
   TankerOrderEntity,
   TankerInvoiceEntity,
+  TankerOrderMessageEntity,
   TankerPromoCodeEntity,
   TankerTaxSettingEntity,
   TankerPlatformFeeSettingEntity,
+  PrivacyPolicyEntity,
+  TermsDocumentEntity,
+  TermsAcceptanceEntity,
+  FaqEntity,
+  SupportContactSettingsEntity,
+  AnnouncementEntity,
 ];
 
 export function buildDataSourceOptions(overrides: Partial<DataSourceOptions> = {}): DataSourceOptions {

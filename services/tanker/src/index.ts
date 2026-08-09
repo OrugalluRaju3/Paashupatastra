@@ -1,7 +1,9 @@
 import "reflect-metadata";
 import {
+  NotificationLogEntity,
   TankerInvoiceEntity,
   TankerOrderEntity,
+  TankerOrderMessageEntity,
   TankerPlatformFeeSettingEntity,
   TankerPromoCodeEntity,
   TankerRequestEntity,
@@ -33,6 +35,8 @@ import {
   paginationQuerySchema,
   phoneSchema,
   registerTankerSupplierSchema,
+  searchTankerSuppliersSchema,
+  tankerOrderChatMessageSchema,
   updateUserStatusSchema,
   updateDriverLocationSchema,
   updateTankerOrderStatusSchema,
@@ -60,6 +64,42 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
 
 function makeDeliveryOtp() {
   return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+/** Compare HH:mm strings as minutes from midnight. */
+function timeToMinutes(hhmm: string) {
+  const [h, m] = hhmm.split(":").map((x) => Number.parseInt(x, 10));
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return 0;
+  return h * 60 + m;
+}
+
+function isTimeWithinAvailability(deliveryTime: string, start: string, end: string) {
+  const t = timeToMinutes(deliveryTime);
+  const s = timeToMinutes(start || "06:00");
+  const e = timeToMinutes(end || "22:00");
+  if (s === e) return true;
+  if (s < e) return t >= s && t <= e;
+  // Overnight window (e.g. 22:00–06:00)
+  return t >= s || t <= e;
+}
+
+/** Normalize water type labels so "drinking" matches "Drinking Water", etc. */
+function normalizeWaterTypeKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\bwater\b/g, "")
+    .replace(/\bwell\b/g, "")
+    .trim();
+}
+
+function waterTypesMatch(requested: string, vehicleType: string) {
+  const a = normalizeWaterTypeKey(requested);
+  const b = normalizeWaterTypeKey(vehicleType);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.includes(b) || b.includes(a);
 }
 
 function serializeSupplier(row: TankerSupplierEntity) {
@@ -119,6 +159,7 @@ function serializeRequest(row: TankerRequestEntity) {
     quantityLitres: row.quantityLitres,
     comments: row.comments,
     deliveryAddress: row.deliveryAddress,
+    preferredDeliveryAt: toIso(row.preferredDeliveryAt),
     latitude: row.latitude,
     longitude: row.longitude,
     status: row.status,
@@ -128,6 +169,12 @@ function serializeRequest(row: TankerRequestEntity) {
 }
 
 function serializeOrder(row: TankerOrderEntity) {
+  const dueAt = resolvePaymentDueAt(row);
+  const paymentSecondsRemaining =
+    row.paymentStatus === PaymentStatus.PAID || !dueAt
+      ? null
+      : Math.max(0, Math.floor((dueAt.getTime() - Date.now()) / 1000));
+
   const base = {
     id: row.id,
     customerUserId: row.customerUserId,
@@ -152,6 +199,8 @@ function serializeOrder(row: TankerOrderEntity) {
     paymentStatus: row.paymentStatus,
     paymentProvider: row.paymentProvider,
     paymentProviderOrderId: row.paymentProviderOrderId,
+    paymentDueAt: dueAt ? toIsoRequired(dueAt) : null,
+    paymentSecondsRemaining,
     status: row.status,
     otpVerified: row.otpVerified,
     driverLatitude: row.driverLatitude,
@@ -170,6 +219,7 @@ function serializeOrder(row: TankerOrderEntity) {
 function serializeInvoice(row: TankerInvoiceEntity) {
   return {
     id: row.id,
+    invoiceNumber: `INV-TK-${row.id}`,
     orderId: row.orderId,
     customerUserId: row.customerUserId,
     supplierId: row.supplierId,
@@ -178,6 +228,14 @@ function serializeInvoice(row: TankerInvoiceEntity) {
     createdAt: toIsoRequired(row.createdAt),
     updatedAt: toIsoRequired(row.updatedAt),
   };
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function serializePromo(row: TankerPromoCodeEntity) {
@@ -346,6 +404,325 @@ const verifyOtpSchema = z.object({
   otp: z.string().min(4).max(8),
 });
 
+function notificationsBaseUrl() {
+  return (process.env.NOTIFICATIONS_URL ?? "http://localhost:3006").replace(/\/$/, "");
+}
+
+function paymentsBaseUrl() {
+  return (process.env.PAYMENTS_URL ?? "http://localhost:3005").replace(/\/$/, "");
+}
+
+async function collectTankerPaymentToPlatform(orderId: number) {
+  const res = await fetch(`${paymentsBaseUrl()}/v1/payments/tanker-orders/${orderId}/collect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: { message?: string };
+    amountInPaise?: number;
+    alreadyPaid?: boolean;
+  };
+  if (!res.ok) {
+    throw new Error(data?.error?.message ?? `Platform wallet collect failed (${res.status})`);
+  }
+  return data;
+}
+
+async function settleTankerPaymentToSupplier(orderId: number) {
+  const res = await fetch(`${paymentsBaseUrl()}/v1/payments/tanker-orders/${orderId}/settle`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: { message?: string };
+    supplierShareInPaise?: number;
+    platformFeeInPaise?: number;
+    alreadySettled?: boolean;
+  };
+  if (!res.ok) {
+    throw new Error(data?.error?.message ?? `Supplier wallet settlement failed (${res.status})`);
+  }
+  return data;
+}
+
+/** After supplier accept, customer must pay within this window or tanker is released. */
+const PAYMENT_WINDOW_MS = 10 * 60 * 1000;
+
+function paymentDueAtFrom(from = new Date()) {
+  return new Date(from.getTime() + PAYMENT_WINDOW_MS);
+}
+
+function resolvePaymentDueAt(row: TankerOrderEntity) {
+  if (row.paymentDueAt) return new Date(row.paymentDueAt);
+  if (row.createdAt) return paymentDueAtFrom(new Date(row.createdAt));
+  return null;
+}
+
+function formatInr(paise: number) {
+  return `₹${(paise / 100).toFixed(2)}`;
+}
+
+function canChatOnTankerOrder(order: { paymentStatus: string; status: string }) {
+  if (order.paymentStatus !== PaymentStatus.PAID) return false;
+  if (order.status === TankerOrderStatus.CANCELLED) return false;
+  return true;
+}
+
+function canSendTankerChat(order: { paymentStatus: string; status: string }) {
+  return (
+    canChatOnTankerOrder(order) &&
+    order.status !== TankerOrderStatus.DELIVERED
+  );
+}
+
+function serializeOrderMessage(
+  row: TankerOrderMessageEntity,
+  senderName: string | null,
+  currentUserId: number,
+) {
+  return {
+    id: row.id,
+    orderId: row.orderId,
+    senderUserId: row.senderUserId,
+    senderName,
+    body: row.body,
+    mine: row.senderUserId === currentUserId,
+    createdAt: toIsoRequired(row.createdAt),
+  };
+}
+
+function formatVehicleSummary(v: {
+  vehicleNumber: string;
+  driverFullName: string;
+  driverMobile: string;
+  driverEmail?: string | null;
+  capacityLitres: number;
+  amountInPaise: number;
+  waterType: string;
+  status?: string;
+}) {
+  return [
+    `Vehicle: ${v.vehicleNumber}`,
+    `Water: ${v.waterType}`,
+    `Capacity: ${v.capacityLitres} L`,
+    `Rate: ${formatInr(v.amountInPaise)}`,
+    v.status ? `Status: ${v.status.replaceAll("_", " ")}` : null,
+    `Driver: ${v.driverFullName} · ${v.driverMobile}${v.driverEmail ? ` · ${v.driverEmail}` : ""}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatSupplierSummary(s: {
+  id: number;
+  fullName: string;
+  email?: string | null;
+  alternateMobile?: string | null;
+  address: string;
+  city: string;
+  state: string;
+  pinCode: string;
+}) {
+  return [
+    `Supplier #${s.id}: ${s.fullName}`,
+    s.email ? `Email: ${s.email}` : null,
+    s.alternateMobile ? `Alt mobile: ${s.alternateMobile}` : null,
+    `Address: ${s.address}, ${s.city}, ${s.state} ${s.pinCode}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function notify(
+  ds: Awaited<ReturnType<typeof getDataSource>>,
+  input: {
+    userId?: number | null;
+    audience: "customer" | "supplier" | "driver" | "admin";
+    title: string;
+    body: string;
+    referenceType?: string;
+    referenceId?: number;
+    toEmail?: string | null;
+    toPhone?: string | null;
+  },
+) {
+  const repo = ds.getRepository(NotificationLogEntity);
+
+  if (input.userId) {
+    await repo.save(
+      repo.create({
+        userId: input.userId,
+        module: "tanker",
+        audience: input.audience,
+        channel: "in_app",
+        title: input.title,
+        body: input.body,
+        status: "unread",
+        referenceType: input.referenceType ?? null,
+        referenceId: input.referenceId ?? null,
+        readAt: null,
+      }),
+    );
+  }
+
+  if (input.toEmail) {
+    try {
+      await fetch(`${notificationsBaseUrl()}/v1/notifications/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: input.userId ?? undefined,
+          toEmail: input.toEmail,
+          toPhone: input.toPhone ?? undefined,
+          title: input.title,
+          body: input.body,
+          referenceType: input.referenceType,
+          referenceId: input.referenceId,
+          skipLog: true,
+        }),
+      });
+    } catch {
+      // inbox row already saved
+    }
+  }
+}
+
+function formatOrderStatusLabel(status: string) {
+  return status.replaceAll("_", " ");
+}
+
+function customerStatusUpdateCopy(status: string): { title: string; detail: string } {
+  switch (status) {
+    case TankerOrderStatus.SCHEDULED:
+      return {
+        title: "Delivery scheduled",
+        detail: "Your water tanker delivery has been scheduled.",
+      };
+    case TankerOrderStatus.EN_ROUTE:
+      return {
+        title: "Driver en route to fill water",
+        detail: "Your driver is on the way to fill the tanker.",
+      };
+    case TankerOrderStatus.WATER_FILLED:
+      return {
+        title: "Tanker filled with water",
+        detail: "The tanker has been filled and is preparing for delivery.",
+      };
+    case TankerOrderStatus.ON_THE_WAY:
+      return {
+        title: "Tanker is on the way",
+        detail: "Your water tanker is on the way to your delivery address.",
+      };
+    case TankerOrderStatus.AT_LOCATION:
+      return {
+        title: "Tanker arrived at your location",
+        detail: "The driver has arrived at your delivery address.",
+      };
+    case TankerOrderStatus.DELIVERING:
+      return {
+        title: "Water delivery in progress",
+        detail: "OTP verified — water is being delivered now.",
+      };
+    case TankerOrderStatus.DELIVERED:
+      return {
+        title: "Water delivered",
+        detail: "Your water tanker delivery is complete. Thank you!",
+      };
+    case TankerOrderStatus.CANCELLED:
+      return {
+        title: "Delivery cancelled",
+        detail: "Your water tanker order has been cancelled.",
+      };
+    default:
+      return {
+        title: `Delivery update: ${formatOrderStatusLabel(status)}`,
+        detail: `Your order status is now ${formatOrderStatusLabel(status)}.`,
+      };
+  }
+}
+
+async function notifyCustomerOrderStatus(
+  ds: Awaited<ReturnType<typeof getDataSource>>,
+  order: TankerOrderEntity,
+  previousStatus: string | null,
+) {
+  if (previousStatus != null && previousStatus === order.status) return;
+
+  const customer = await ds.getRepository(TankerUserEntity).findOne({
+    where: { id: order.customerUserId },
+  });
+  if (!customer) return;
+
+  const copy = customerStatusUpdateCopy(order.status);
+  const lines = [
+    `Hello ${customer.name ?? "Customer"},`,
+    "",
+    copy.detail,
+    "",
+    `Order #${order.id}`,
+    `Status: ${formatOrderStatusLabel(order.status)}`,
+    previousStatus
+      ? `Previous: ${formatOrderStatusLabel(previousStatus)}`
+      : null,
+    order.vehicleNumber ? `Vehicle: ${order.vehicleNumber}` : null,
+    order.driverName
+      ? `Driver: ${order.driverName}${order.driverMobile ? ` · ${order.driverMobile}` : ""}`
+      : null,
+    `Delivery address: ${order.deliveryAddress}`,
+    "",
+    "Track progress under My orders.",
+  ].filter(Boolean);
+
+  await notify(ds, {
+    userId: customer.id,
+    audience: "customer",
+    toEmail: customer.email,
+    toPhone: customer.phone,
+    title: copy.title,
+    body: lines.join("\n"),
+    referenceType: "tanker_order",
+    referenceId: order.id,
+  });
+}
+
+async function notifyTankerAdmins(
+  ds: Awaited<ReturnType<typeof getDataSource>>,
+  input: {
+    title: string;
+    body: string;
+    referenceType?: string;
+    referenceId?: number;
+  },
+) {
+  const admins = await ds
+    .getRepository(TankerUserEntity)
+    .createQueryBuilder("u")
+    .where("u.is_active = true")
+    .andWhere(`:role = ANY(u.roles)`, { role: UserRole.TANKER_SUPER_ADMIN })
+    .getMany();
+
+  if (admins.length === 0) return;
+
+  await Promise.allSettled(
+    admins.map((admin) =>
+      notify(ds, {
+        userId: admin.id,
+        audience: "admin",
+        toEmail: admin.email,
+        toPhone: admin.phone,
+        title: input.title,
+        body: `Hello ${admin.name ?? "Tanker Admin"},\n\n${input.body}`,
+        referenceType: input.referenceType,
+        referenceId: input.referenceId,
+      }),
+    ),
+  );
+}
+
 async function main() {
   loadEnv();
   const ds = await getDataSource();
@@ -356,9 +733,164 @@ async function main() {
   const orderRepo = ds.getRepository(TankerOrderEntity);
   const userRepo = ds.getRepository(TankerUserEntity);
   const invoiceRepo = ds.getRepository(TankerInvoiceEntity);
+  const messageRepo = ds.getRepository(TankerOrderMessageEntity);
   const promoRepo = ds.getRepository(TankerPromoCodeEntity);
   const taxRepo = ds.getRepository(TankerTaxSettingEntity);
   const platformFeeRepo = ds.getRepository(TankerPlatformFeeSettingEntity);
+
+  async function ensureInvoiceForOrder(order: TankerOrderEntity) {
+    if (order.paymentStatus !== PaymentStatus.PAID) return null;
+
+    let invoice = await invoiceRepo.findOne({ where: { orderId: order.id } });
+    if (invoice) {
+      const amount = order.totalAmountInPaise || order.amountInPaise;
+      if (invoice.amountInPaise !== amount || invoice.status !== PaymentStatus.PAID) {
+        invoice.amountInPaise = amount;
+        invoice.status = PaymentStatus.PAID;
+        invoice = await invoiceRepo.save(invoice);
+      }
+      return invoice;
+    }
+
+    return invoiceRepo.save(
+      invoiceRepo.create({
+        orderId: order.id,
+        customerUserId: order.customerUserId,
+        supplierId: order.supplierId,
+        amountInPaise: order.totalAmountInPaise || order.amountInPaise,
+        status: PaymentStatus.PAID,
+      }),
+    );
+  }
+
+  async function userCanAccessInvoice(userId: number | null, roles: string[], invoice: TankerInvoiceEntity) {
+    if (!userId) return false;
+    if (roles.includes(UserRole.TANKER_SUPER_ADMIN)) return true;
+    if (invoice.customerUserId === userId) return true;
+    const supplier = await supplierRepo.findOne({ where: { id: invoice.supplierId } });
+    return supplier?.userId === userId;
+  }
+
+  async function buildInvoiceDetail(invoice: TankerInvoiceEntity) {
+    const order = await orderRepo.findOne({ where: { id: invoice.orderId } });
+    const customer = await userRepo.findOne({ where: { id: invoice.customerUserId } });
+    const supplier = await supplierRepo.findOne({ where: { id: invoice.supplierId } });
+
+    return {
+      ...serializeInvoice(invoice),
+      order: order
+        ? {
+            id: order.id,
+            waterType: order.waterType,
+            capacityLitres: order.capacityLitres,
+            vehicleNumber: order.vehicleNumber,
+            driverName: order.driverName,
+            driverMobile: order.driverMobile,
+            deliveryAddress: order.deliveryAddress,
+            amountInPaise: order.amountInPaise,
+            platformFeeInPaise: order.platformFeeInPaise,
+            taxInPaise: order.taxInPaise,
+            discountInPaise: order.discountInPaise,
+            totalAmountInPaise: order.totalAmountInPaise || order.amountInPaise,
+            promoCode: order.promoCode,
+            paymentStatus: order.paymentStatus,
+            status: order.status,
+            paymentProviderOrderId: order.paymentProviderOrderId,
+            createdAt: toIsoRequired(order.createdAt),
+          }
+        : null,
+      customer: customer
+        ? {
+            id: customer.id,
+            name: customer.name,
+            phone: customer.phone,
+            email: customer.email,
+          }
+        : null,
+      supplier: supplier
+        ? {
+            id: supplier.id,
+            fullName: supplier.fullName,
+            phone: supplier.alternateMobile,
+            email: supplier.email,
+            address: supplier.address,
+            city: supplier.city,
+            state: supplier.state,
+          }
+        : null,
+    };
+  }
+
+  function renderInvoiceHtml(detail: Awaited<ReturnType<typeof buildInvoiceDetail>>) {
+    const order = detail.order;
+    const issued = new Date(detail.createdAt).toLocaleString("en-IN");
+    const rows = [
+      ["Water type", order?.waterType ?? "—"],
+      ["Capacity", order ? `${order.capacityLitres.toLocaleString("en-IN")} L` : "—"],
+      ["Vehicle", order?.vehicleNumber ?? "—"],
+      ["Driver", order?.driverName ? `${order.driverName}${order.driverMobile ? ` · ${order.driverMobile}` : ""}` : "—"],
+      ["Delivery address", order?.deliveryAddress ?? "—"],
+      ["Base amount", formatInr(order?.amountInPaise ?? detail.amountInPaise)],
+      ["Platform fee", formatInr(order?.platformFeeInPaise ?? 0)],
+      ["Tax", formatInr(order?.taxInPaise ?? 0)],
+      ["Discount", formatInr(order?.discountInPaise ?? 0)],
+      ["Promo", order?.promoCode ?? "—"],
+      ["Total paid", formatInr(order?.totalAmountInPaise ?? detail.amountInPaise)],
+      ["Payment status", detail.status],
+      ["Order status", order?.status?.replaceAll("_", " ") ?? "—"],
+      ["Payment ref", order?.paymentProviderOrderId ?? "—"],
+    ];
+
+    const tableRows = rows
+      .map(
+        ([label, value]) =>
+          `<tr><th style="text-align:left;padding:8px;border-bottom:1px solid #e5e7eb;color:#64748b;width:38%">${escapeHtml(String(label))}</th><td style="padding:8px;border-bottom:1px solid #e5e7eb">${escapeHtml(String(value))}</td></tr>`,
+      )
+      .join("");
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(detail.invoiceNumber)}</title>
+  <style>
+    body { font-family: Georgia, "Times New Roman", serif; color: #0f172a; margin: 0; background: #f8fafc; }
+    .sheet { max-width: 800px; margin: 24px auto; background: #fff; padding: 32px; border: 1px solid #e2e8f0; }
+    h1 { margin: 0 0 4px; font-size: 28px; }
+    .muted { color: #64748b; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+    .box { background: #f8fafc; padding: 12px 14px; border-radius: 8px; }
+    .total { font-size: 22px; font-weight: 700; margin-top: 16px; }
+    @media print { body { background: #fff; } .sheet { border: none; margin: 0; } .no-print { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <p class="muted no-print"><button onclick="window.print()">Print / Save as PDF</button></p>
+    <h1>Paashupatastra</h1>
+    <p class="muted">Water tanker invoice</p>
+    <p><strong>${escapeHtml(detail.invoiceNumber)}</strong><br/>Issued ${escapeHtml(issued)}<br/>Order #${escapeHtml(String(detail.orderId))}</p>
+    <div class="grid">
+      <div class="box">
+        <div class="muted">Billed to (customer)</div>
+        <strong>${escapeHtml(detail.customer?.name ?? "Customer")}</strong><br/>
+        ${escapeHtml(detail.customer?.phone ?? "—")}<br/>
+        ${escapeHtml(detail.customer?.email ?? "")}
+      </div>
+      <div class="box">
+        <div class="muted">Supplier</div>
+        <strong>${escapeHtml(detail.supplier?.fullName ?? "Supplier")}</strong><br/>
+        ${escapeHtml(detail.supplier?.phone ?? "—")}<br/>
+        ${escapeHtml([detail.supplier?.address, detail.supplier?.city, detail.supplier?.state].filter(Boolean).join(", "))}
+      </div>
+    </div>
+    <table style="width:100%;border-collapse:collapse">${tableRows}</table>
+    <p class="total">Amount paid: ${escapeHtml(formatInr(detail.amountInPaise))}</p>
+    <p class="muted">This is a computer-generated invoice for your tanker booking.</p>
+  </div>
+</body>
+</html>`;
+  }
 
   function normalizePhone(phone: string | null | undefined) {
     const digits = String(phone ?? "").replace(/\D/g, "");
@@ -419,6 +951,159 @@ async function main() {
       }
     }
     return false;
+  }
+
+  async function userIsOrderDriver(userId: number, order: TankerOrderEntity) {
+    const user = await userRepo.findOne({ where: { id: userId } });
+    if (!user) return false;
+    if (normalizePhone(order.driverMobile) === normalizePhone(user.phone)) return true;
+    if (order.vehicleId) {
+      const vehicle = await vehicleRepo.findOne({ where: { id: order.vehicleId } });
+      if (vehicle && normalizePhone(vehicle.driverMobile) === normalizePhone(user.phone)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function userCanChatOnOrder(userId: number, order: TankerOrderEntity) {
+    if (order.customerUserId === userId) return "customer" as const;
+    if (await userIsOrderDriver(userId, order)) return "driver" as const;
+    const supplier = await supplierRepo.findOne({ where: { id: order.supplierId } });
+    if (supplier?.userId === userId) return "supplier" as const;
+    return null;
+  }
+
+  async function releaseExpiredUnpaidOrders(log?: { info: (obj: object, msg: string) => void }) {
+    const candidates = await orderRepo.find({
+      where: {
+        paymentStatus: PaymentStatus.PENDING,
+        status: Not(In([TankerOrderStatus.DELIVERED, TankerOrderStatus.CANCELLED])),
+      },
+      take: 100,
+      order: { createdAt: "ASC" },
+    });
+
+    const now = Date.now();
+    let released = 0;
+
+    for (const order of candidates) {
+      const dueAt = resolvePaymentDueAt(order);
+      if (!dueAt || dueAt.getTime() > now) continue;
+
+      order.status = TankerOrderStatus.CANCELLED;
+      order.paymentStatus = PaymentStatus.FAILED;
+      if (!order.paymentDueAt) order.paymentDueAt = dueAt;
+      await orderRepo.save(order);
+
+      if (order.vehicleId) {
+        const vehicle = await vehicleRepo.findOne({ where: { id: order.vehicleId } });
+        if (vehicle && vehicle.status === TankerVehicleStatus.ON_DELIVERY) {
+          vehicle.status = TankerVehicleStatus.AVAILABLE;
+          await vehicleRepo.save(vehicle);
+        }
+      }
+
+      if (order.requestId) {
+        const req = await requestRepo.findOne({ where: { id: order.requestId } });
+        if (req && req.status === TankerRequestStatus.ACCEPTED) {
+          req.status = TankerRequestStatus.CANCELLED;
+          await requestRepo.save(req);
+        }
+      }
+
+      const customer = await userRepo.findOne({ where: { id: order.customerUserId } });
+      const supplier = await supplierRepo.findOne({ where: { id: order.supplierId } });
+      const supplierUser = supplier
+        ? await userRepo.findOne({ where: { id: supplier.userId } })
+        : null;
+      const driverUser = order.driverMobile
+        ? await ensureDriverUser({
+            mobile: order.driverMobile,
+            name: order.driverName,
+          })
+        : null;
+
+      const detail = [
+        `Order #${order.id}`,
+        order.vehicleNumber ? `Vehicle: ${order.vehicleNumber}` : null,
+        `Amount: ${formatInr(order.totalAmountInPaise || order.amountInPaise)}`,
+        `Address: ${order.deliveryAddress}`,
+        "",
+        "Payment was not completed within 10 minutes, so the tanker was released.",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const jobs: Array<Promise<unknown>> = [];
+      if (customer) {
+        jobs.push(
+          notify(ds, {
+            userId: customer.id,
+            audience: "customer",
+            toEmail: customer.email,
+            toPhone: customer.phone,
+            title: "Payment window expired — order cancelled",
+            body: [
+              `Hello ${customer.name ?? "Customer"},`,
+              "",
+              detail,
+              "",
+              "Please search again if you still need a tanker.",
+            ].join("\n"),
+            referenceType: "tanker_order",
+            referenceId: order.id,
+          }),
+        );
+      }
+      if (supplier && supplierUser) {
+        jobs.push(
+          notify(ds, {
+            userId: supplierUser.id,
+            audience: "supplier",
+            toEmail: supplier.email ?? supplierUser.email,
+            toPhone: supplier.alternateMobile ?? supplierUser.phone,
+            title: "Tanker released — customer payment timed out",
+            body: [
+              `Hello ${supplier.fullName},`,
+              "",
+              detail,
+              "",
+              "The vehicle is available again for new requests.",
+            ].join("\n"),
+            referenceType: "tanker_order",
+            referenceId: order.id,
+          }),
+        );
+      }
+      if (driverUser) {
+        jobs.push(
+          notify(ds, {
+            userId: driverUser.id,
+            audience: "driver",
+            toEmail: driverUser.email,
+            toPhone: driverUser.phone,
+            title: "Delivery cancelled — payment timed out",
+            body: [
+              `Hello ${order.driverName || driverUser.name || "Driver"},`,
+              "",
+              detail,
+              "",
+              "This assignment is cancelled. Wait for the next job.",
+            ].join("\n"),
+            referenceType: "tanker_order",
+            referenceId: order.id,
+          }),
+        );
+      }
+      await Promise.allSettled(jobs);
+      released += 1;
+    }
+
+    if (released > 0) {
+      log?.info({ released }, "Released tankers after unpaid payment timeout");
+    }
+    return released;
   }
 
   async function computeFees(amountInPaise: number, promoCode?: string | null) {
@@ -490,7 +1175,7 @@ async function main() {
     const saved = await orderRepo.save(order);
 
     if (io) {
-      io.to(`order:${orderId}`).emit("driverLocation", {
+      io.to(`order:${String(orderId)}`).emit("driverLocation", {
         orderId: String(orderId),
         latitude,
         longitude,
@@ -509,17 +1194,39 @@ async function main() {
     name: "tanker",
     port: envInt("TANKER_PORT", 3007),
     afterReady: async (app) => {
+      await ds.query(`
+        CREATE TABLE IF NOT EXISTS tanker_order_messages (
+          id SERIAL PRIMARY KEY,
+          order_id INT NOT NULL,
+          sender_user_id INT NOT NULL,
+          body TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await ds.query(`
+        CREATE INDEX IF NOT EXISTS idx_tanker_order_messages_order_id
+        ON tanker_order_messages (order_id)
+      `);
+      await ds.query(`
+        CREATE INDEX IF NOT EXISTS idx_tanker_order_messages_sender_user_id
+        ON tanker_order_messages (sender_user_id)
+      `);
+
       io = new Server(app.server, { cors: { origin: true } });
       io.on("connection", (socket) => {
-        socket.on("trackDriver", (data: { orderId?: string }) => {
-          if (data?.orderId) socket.join(`order:${data.orderId}`);
+        socket.on("trackDriver", (data: { orderId?: string | number }) => {
+          if (data?.orderId != null && String(data.orderId)) {
+            socket.join(`order:${String(data.orderId)}`);
+          }
         });
-        socket.on("stopTracking", (data: { orderId?: string }) => {
-          if (data?.orderId) socket.leave(`order:${data.orderId}`);
+        socket.on("stopTracking", (data: { orderId?: string | number }) => {
+          if (data?.orderId != null && String(data.orderId)) {
+            socket.leave(`order:${String(data.orderId)}`);
+          }
         });
         socket.on(
           "driverLocationUpdate",
-          async (data: { orderId?: string; latitude?: number; longitude?: number }) => {
+          async (data: { orderId?: string | number; latitude?: number; longitude?: number }) => {
             if (
               data?.orderId == null ||
               data.latitude == null ||
@@ -527,10 +1234,26 @@ async function main() {
             ) {
               return;
             }
-            await updateOrderDriverLocation(parseEntityId(data.orderId), data.latitude, data.longitude);
+            try {
+              await updateOrderDriverLocation(
+                parseEntityId(String(data.orderId)),
+                Number(data.latitude),
+                Number(data.longitude),
+              );
+            } catch (err) {
+              app.log.warn({ err, data }, "driverLocationUpdate failed");
+            }
           },
         );
       });
+
+      const paymentWatch = setInterval(() => {
+        void releaseExpiredUnpaidOrders(app.log).catch((err) => {
+          app.log.error({ err }, "Failed to release unpaid tanker orders");
+        });
+      }, 30_000);
+      paymentWatch.unref?.();
+      void releaseExpiredUnpaidOrders(app.log);
     },
     registerRoutes: async (app) => {
       app.get("/v1/tanker/stats", async () => {
@@ -635,13 +1358,23 @@ async function main() {
         const raw = request.query as { role?: string };
         const qb = userRepo.createQueryBuilder("u").orderBy("u.created_at", "DESC");
 
-        if (raw.role === UserRole.TANKER_SUPPLIER || raw.role === UserRole.TANKER_DRIVER) {
+        if (
+          raw.role === UserRole.TANKER_SUPPLIER ||
+          raw.role === UserRole.TANKER_DRIVER ||
+          raw.role === UserRole.CUSTOMER ||
+          raw.role === UserRole.TANKER_SUPER_ADMIN
+        ) {
           qb.andWhere(`:role = ANY(u.roles)`, { role: raw.role });
         } else {
-          qb.andWhere(`(:supplier = ANY(u.roles) OR :driver = ANY(u.roles))`, {
-            supplier: UserRole.TANKER_SUPPLIER,
-            driver: UserRole.TANKER_DRIVER,
-          });
+          qb.andWhere(
+            `(:customer = ANY(u.roles) OR :supplier = ANY(u.roles) OR :driver = ANY(u.roles) OR :admin = ANY(u.roles))`,
+            {
+              customer: UserRole.CUSTOMER,
+              supplier: UserRole.TANKER_SUPPLIER,
+              driver: UserRole.TANKER_DRIVER,
+              admin: UserRole.TANKER_SUPER_ADMIN,
+            },
+          );
         }
 
         if (query.q) {
@@ -681,6 +1414,8 @@ async function main() {
           });
         }
 
+        const beforeRoles = [...(user.roles ?? [])];
+
         if (body.phone !== undefined) user.phone = body.phone;
         if (body.name !== undefined) user.name = body.name;
         if (body.email !== undefined) user.email = body.email;
@@ -692,7 +1427,36 @@ async function main() {
         if (body.preferredLocation !== undefined) user.preferredLocation = body.preferredLocation;
         if (body.roles !== undefined) user.roles = body.roles;
 
-        return serializeTankerUser(await userRepo.save(user));
+        const saved = await userRepo.save(user);
+        const isDriver =
+          saved.roles.includes(UserRole.TANKER_DRIVER) ||
+          beforeRoles.includes(UserRole.TANKER_DRIVER);
+
+        if (isDriver) {
+          const linked = await vehiclesForDriverPhone(saved.phone);
+          void notifyTankerAdmins(ds, {
+            title: "Driver details updated",
+            body: [
+              "A tanker driver's account details were updated.",
+              "",
+              `Driver #${saved.id}: ${saved.name ?? "—"}`,
+              `Mobile: ${saved.phone}`,
+              `Email: ${saved.email ?? "—"}`,
+              `City: ${saved.city ?? "—"}, ${saved.state ?? "—"} ${saved.pinCode ?? ""}`.trim(),
+              `Roles: ${saved.roles.join(", ")}`,
+              `Status: ${saved.isActive ? "active" : "inactive"}`,
+              linked.length > 0
+                ? `\nLinked tankers:\n${linked
+                    .map((v) => `• ${v.vehicleNumber} (supplier #${v.supplierId})`)
+                    .join("\n")}`
+                : "\nNo active tankers linked to this mobile.",
+            ].join("\n"),
+            referenceType: "tanker_driver",
+            referenceId: saved.id,
+          });
+        }
+
+        return serializeTankerUser(saved);
       });
 
       app.patch("/v1/tanker/users/:id/status", async (request, reply) => {
@@ -770,6 +1534,20 @@ async function main() {
             isActive: true,
           }),
         );
+
+        void notifyTankerAdmins(ds, {
+          title: "New water tanker supplier registered",
+          body: [
+            "A supplier created their profile (without fleet yet).",
+            "",
+            formatSupplierSummary(saved),
+            user.phone ? `Login mobile: ${user.phone}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          referenceType: "tanker_supplier",
+          referenceId: saved.id,
+        });
 
         // Profile only — role assignment is handled separately
         return reply.code(201).send(serializeSupplier(saved));
@@ -865,6 +1643,30 @@ async function main() {
           vehicles.push(serializeVehicle(savedVehicle));
         }
 
+        const fleetLines = vehicles
+          .map(
+            (v, i) =>
+              `${i + 1}. ${v.vehicleNumber} · ${v.capacityLitres} L · ${v.waterType} · driver ${v.driverFullName} (${v.driverMobile})`,
+          )
+          .join("\n");
+
+        void notifyTankerAdmins(ds, {
+          title: "New water tanker supplier registered",
+          body: [
+            "A supplier completed registration with fleet details.",
+            "",
+            formatSupplierSummary(supplier),
+            user.phone ? `Login mobile: ${user.phone}` : null,
+            "",
+            `Tankers added (${vehicles.length}):`,
+            fleetLines || "—",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          referenceType: "tanker_supplier",
+          referenceId: supplier.id,
+        });
+
         return reply.code(201).send({
           supplier: serializeSupplier(supplier),
           vehicles,
@@ -921,7 +1723,20 @@ async function main() {
         if (body.longitude !== undefined) row.longitude = body.longitude ?? null;
         if (body.proofUrl !== undefined) row.proofUrl = body.proofUrl ?? null;
 
-        return serializeSupplier(await supplierRepo.save(row));
+        const saved = await supplierRepo.save(row);
+
+        void notifyTankerAdmins(ds, {
+          title: "Supplier profile updated",
+          body: [
+            "A water tanker supplier updated their profile.",
+            "",
+            formatSupplierSummary(saved),
+          ].join("\n"),
+          referenceType: "tanker_supplier",
+          referenceId: saved.id,
+        });
+
+        return serializeSupplier(saved);
       });
 
       app.patch("/v1/tanker/suppliers/me/online", async (request, reply) => {
@@ -1004,6 +1819,107 @@ async function main() {
         return { items, lat, lng, radiusKm };
       });
 
+      /**
+       * Customer search: only suppliers whose availability window covers the
+       * requested time and who have an available vehicle matching water type + capacity.
+       */
+      app.get("/v1/tanker/suppliers/search", async (request, reply) => {
+        const parsed = searchTankerSuppliersSchema.safeParse(request.query);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: {
+              code: "INVALID_QUERY",
+              message:
+                "waterType, quantityLitres, deliveryDate (YYYY-MM-DD), and deliveryTime (HH:mm) are required",
+              details: parsed.error.flatten(),
+            },
+          });
+        }
+
+        const { waterType, quantityLitres, deliveryDate, deliveryTime, lat, lng, radiusKm } =
+          parsed.data;
+
+        const suppliers = await supplierRepo.find({
+          where: { isActive: true },
+          order: { createdAt: "DESC" },
+        });
+
+        const inWindow = suppliers.filter((s) =>
+          isTimeWithinAvailability(deliveryTime, s.availabilityStartTime, s.availabilityEndTime),
+        );
+
+        if (inWindow.length === 0) {
+          return {
+            items: [],
+            filters: { waterType, quantityLitres, deliveryDate, deliveryTime, lat, lng, radiusKm },
+            message: "No suppliers are available at the selected date and time.",
+          };
+        }
+
+        const supplierIds = inWindow.map((s) => s.id);
+        const vehicles = await vehicleRepo.find({
+          where: {
+            supplierId: In(supplierIds),
+            isActive: true,
+            status: TankerVehicleStatus.AVAILABLE,
+          },
+        });
+
+        const matchingBySupplier = new Map<number, TankerVehicleEntity[]>();
+        for (const v of vehicles) {
+          if (!waterTypesMatch(waterType, v.waterType)) continue;
+          if (v.capacityLitres < quantityLitres) continue;
+          const list = matchingBySupplier.get(v.supplierId) ?? [];
+          list.push(v);
+          matchingBySupplier.set(v.supplierId, list);
+        }
+
+        type SearchItem = {
+          supplier: ReturnType<typeof serializeSupplier>;
+          matchingVehicles: ReturnType<typeof serializeVehicle>[];
+          distanceKm: number | null;
+        };
+
+        let items: SearchItem[] = inWindow
+          .filter((s) => matchingBySupplier.has(s.id))
+          .map((s) => {
+            const matchVehicles = matchingBySupplier.get(s.id) ?? [];
+            let distanceKm: number | null = null;
+            if (lat != null && lng != null && s.latitude != null && s.longitude != null) {
+              distanceKm = haversineKm(lat, lng, s.latitude, s.longitude);
+            }
+            return {
+              supplier: serializeSupplier(s),
+              matchingVehicles: matchVehicles
+                .sort((a, b) => a.amountInPaise - b.amountInPaise)
+                .map(serializeVehicle),
+              distanceKm,
+            };
+          });
+
+        if (lat != null && lng != null) {
+          items = items
+            .filter((x) => x.distanceKm == null || x.distanceKm <= radiusKm)
+            .sort((a, b) => {
+              if (a.distanceKm == null && b.distanceKm == null) return 0;
+              if (a.distanceKm == null) return 1;
+              if (b.distanceKm == null) return -1;
+              return a.distanceKm - b.distanceKm;
+            });
+        } else {
+          items.sort((a, b) => a.supplier.fullName.localeCompare(b.supplier.fullName));
+        }
+
+        return {
+          items,
+          filters: { waterType, quantityLitres, deliveryDate, deliveryTime, lat, lng, radiusKm },
+          message:
+            items.length === 0
+              ? "No tankers match your water type, quantity, and availability window."
+              : undefined,
+        };
+      });
+
       app.post("/v1/tanker/vehicles", async (request, reply) => {
         const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
@@ -1053,6 +1969,19 @@ async function main() {
           mobile: body.driverMobile,
           name: body.driverFullName,
           email: body.driverEmail ?? null,
+        });
+
+        void notifyTankerAdmins(ds, {
+          title: "New tanker added",
+          body: [
+            "A supplier added a new tanker to their fleet.",
+            "",
+            formatSupplierSummary(supplier),
+            "",
+            formatVehicleSummary(saved),
+          ].join("\n"),
+          referenceType: "tanker_vehicle",
+          referenceId: saved.id,
         });
 
         return reply.code(201).send(serializeVehicle(saved));
@@ -1109,6 +2038,7 @@ async function main() {
       });
 
       app.get("/v1/tanker/driver/me", async (request, reply) => {
+        await releaseExpiredUnpaidOrders(app.log);
         const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
         if (!userId) {
           return reply.code(401).send({
@@ -1142,18 +2072,29 @@ async function main() {
         }
 
         const vehicles = await vehiclesForDriverPhone(user.phone);
-        const vehicleIds = new Set(vehicles.map((v) => v.id));
+        const vehicleIds = vehicles.map((v) => v.id);
         const mobile = normalizePhone(user.phone);
 
-        const recent = await orderRepo.find({
-          order: { createdAt: "DESC" },
-          take: 100,
-        });
-        const orders = recent.filter(
-          (o) =>
-            (o.vehicleId && vehicleIds.has(o.vehicleId)) ||
-            normalizePhone(o.driverMobile) === mobile,
-        );
+        const qb = orderRepo
+          .createQueryBuilder("o")
+          .orderBy("o.created_at", "DESC")
+          .take(100);
+
+        if (vehicleIds.length > 0) {
+          qb.where(
+            "(o.vehicle_id IN (:...vehicleIds) OR regexp_replace(COALESCE(o.driver_mobile, ''), '\\D', '', 'g') LIKE :mobileSuffix)",
+            {
+              vehicleIds,
+              mobileSuffix: `%${mobile}`,
+            },
+          );
+        } else {
+          qb.where("regexp_replace(COALESCE(o.driver_mobile, ''), '\\D', '', 'g') LIKE :mobileSuffix", {
+            mobileSuffix: `%${mobile}`,
+          });
+        }
+
+        const orders = await qb.getMany();
 
         return {
           phone: user.phone,
@@ -1222,16 +2163,79 @@ async function main() {
         }
 
         const body = updateTankerVehicleSchema.parse(request.body);
+        const before = {
+          driverFullName: vehicle.driverFullName,
+          driverMobile: vehicle.driverMobile,
+          driverEmail: vehicle.driverEmail,
+          capacityLitres: vehicle.capacityLitres,
+          amountInPaise: vehicle.amountInPaise,
+          waterType: vehicle.waterType,
+          status: vehicle.status,
+          isActive: vehicle.isActive,
+        };
         Object.assign(vehicle, body);
         const saved = await vehicleRepo.save(vehicle);
 
-        if (body.driverMobile || body.driverFullName || body.driverEmail !== undefined) {
+        const driverChanged = Boolean(
+          body.driverMobile || body.driverFullName || body.driverEmail !== undefined,
+        );
+        if (driverChanged) {
           await ensureDriverUser({
             mobile: saved.driverMobile,
             name: saved.driverFullName,
             email: saved.driverEmail,
           });
         }
+
+        const changeLines: string[] = [];
+        if (body.driverFullName !== undefined && body.driverFullName !== before.driverFullName) {
+          changeLines.push(`Driver name: ${before.driverFullName} → ${saved.driverFullName}`);
+        }
+        if (body.driverMobile !== undefined && body.driverMobile !== before.driverMobile) {
+          changeLines.push(`Driver mobile: ${before.driverMobile} → ${saved.driverMobile}`);
+        }
+        if (body.driverEmail !== undefined && body.driverEmail !== before.driverEmail) {
+          changeLines.push(
+            `Driver email: ${before.driverEmail ?? "—"} → ${saved.driverEmail ?? "—"}`,
+          );
+        }
+        if (body.capacityLitres !== undefined && body.capacityLitres !== before.capacityLitres) {
+          changeLines.push(`Capacity: ${before.capacityLitres} L → ${saved.capacityLitres} L`);
+        }
+        if (body.amountInPaise !== undefined && body.amountInPaise !== before.amountInPaise) {
+          changeLines.push(
+            `Rate: ${formatInr(before.amountInPaise)} → ${formatInr(saved.amountInPaise)}`,
+          );
+        }
+        if (body.waterType !== undefined && body.waterType !== before.waterType) {
+          changeLines.push(`Water type: ${before.waterType} → ${saved.waterType}`);
+        }
+        if (body.status !== undefined && body.status !== before.status) {
+          changeLines.push(
+            `Status: ${before.status.replaceAll("_", " ")} → ${saved.status.replaceAll("_", " ")}`,
+          );
+        }
+        if (body.isActive !== undefined && body.isActive !== before.isActive) {
+          changeLines.push(`Active: ${before.isActive ? "yes" : "no"} → ${saved.isActive ? "yes" : "no"}`);
+        }
+
+        void notifyTankerAdmins(ds, {
+          title: driverChanged ? "Driver details updated on tanker" : "Tanker updated",
+          body: [
+            driverChanged
+              ? "Driver / tanker details were updated by a supplier."
+              : "A tanker in the fleet was updated.",
+            "",
+            formatSupplierSummary(supplier),
+            "",
+            formatVehicleSummary(saved),
+            changeLines.length > 0 ? `\nChanges:\n${changeLines.join("\n")}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          referenceType: "tanker_vehicle",
+          referenceId: saved.id,
+        });
 
         return serializeVehicle(saved);
       });
@@ -1253,6 +2257,29 @@ async function main() {
               error: { code: "NOT_FOUND", message: "Supplier not found" },
             });
           }
+          if (body.preferredDeliveryAt) {
+            const preferred = new Date(body.preferredDeliveryAt);
+            const deliveryTime = preferred.toLocaleTimeString("en-GB", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+              timeZone: "Asia/Kolkata",
+            });
+            if (
+              !isTimeWithinAvailability(
+                deliveryTime,
+                supplier.availabilityStartTime,
+                supplier.availabilityEndTime,
+              )
+            ) {
+              return reply.code(400).send({
+                error: {
+                  code: "OUTSIDE_AVAILABILITY",
+                  message: `Selected time is outside this supplier's hours (${supplier.availabilityStartTime}–${supplier.availabilityEndTime}).`,
+                },
+              });
+            }
+          }
         }
 
         const saved = await requestRepo.save(
@@ -1263,11 +2290,114 @@ async function main() {
             quantityLitres: body.quantityLitres,
             comments: body.comments ?? null,
             deliveryAddress: body.deliveryAddress,
+            preferredDeliveryAt: body.preferredDeliveryAt
+              ? new Date(body.preferredDeliveryAt)
+              : null,
             latitude: body.latitude ?? null,
             longitude: body.longitude ?? null,
             status: TankerRequestStatus.PENDING,
           }),
         );
+
+        const customer = await userRepo.findOne({ where: { id: userId } });
+        const supplier = body.supplierId
+          ? await supplierRepo.findOne({ where: { id: body.supplierId } })
+          : null;
+        const supplierUser = supplier
+          ? await userRepo.findOne({ where: { id: supplier.userId } })
+          : null;
+
+        const preferredLabel = saved.preferredDeliveryAt
+          ? new Date(saved.preferredDeliveryAt).toLocaleString("en-IN", {
+              timeZone: "Asia/Kolkata",
+            })
+          : "Not specified";
+
+        const requestDetails = [
+          `Request #${saved.id}`,
+          `Water type: ${saved.waterType}`,
+          `Quantity: ${saved.quantityLitres.toLocaleString("en-IN")} L`,
+          `Preferred delivery: ${preferredLabel}`,
+          `Delivery address: ${saved.deliveryAddress}`,
+          saved.comments ? `Comments: ${saved.comments}` : null,
+          `Status: ${saved.status}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const notifyJobs: Array<Promise<unknown>> = [];
+
+        if (customer) {
+          notifyJobs.push(
+            notify(ds, {
+              userId: customer.id,
+              audience: "customer",
+              toEmail: customer.email,
+              toPhone: customer.phone,
+              title: "Water tanker request submitted",
+              body: [
+                `Hello ${customer.name ?? "Customer"},`,
+                "",
+                "Your water tanker request has been submitted successfully.",
+                "",
+                requestDetails,
+                supplier
+                  ? `\nPreferred supplier: ${supplier.fullName}${supplier.email ? ` (${supplier.email})` : ""}`
+                  : "\nNo preferred supplier — nearby suppliers may respond.",
+                "",
+                "Track it under My requests in the tanker customer portal.",
+              ].join("\n"),
+              referenceType: "tanker_request",
+              referenceId: saved.id,
+            }),
+          );
+        }
+
+        if (supplier && supplierUser) {
+          notifyJobs.push(
+            notify(ds, {
+              userId: supplierUser.id,
+              audience: "supplier",
+              toEmail: supplier.email ?? supplierUser.email,
+              toPhone: supplier.alternateMobile ?? supplierUser.phone,
+              title: "New water tanker request",
+              body: [
+                `Hello ${supplier.fullName},`,
+                "",
+                "A customer requested a water tanker from you.",
+                "",
+                requestDetails,
+                "",
+                `Customer: ${customer?.name ?? "—"}`,
+                `Customer mobile: ${customer?.phone ?? "—"}`,
+                customer?.email ? `Customer email: ${customer.email}` : null,
+                "",
+                "Open Supplier → Requests to accept or reject.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              referenceType: "tanker_request",
+              referenceId: saved.id,
+            }),
+          );
+        } else if (!supplier) {
+          notifyJobs.push(
+            notifyTankerAdmins(ds, {
+              title: "Open water tanker request (no preferred supplier)",
+              body: [
+                "A customer submitted a tanker request without selecting a supplier.",
+                "",
+                requestDetails,
+                "",
+                `Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              ].join("\n"),
+              referenceType: "tanker_request",
+              referenceId: saved.id,
+            }),
+          );
+        }
+
+        void Promise.allSettled(notifyJobs);
 
         return reply.code(201).send(serializeRequest(saved));
       });
@@ -1348,25 +2478,59 @@ async function main() {
           tankerRequest.supplierId = supplier.id;
           if (body.comments) tankerRequest.comments = body.comments;
           const saved = await requestRepo.save(tankerRequest);
+
+          const customer = await userRepo.findOne({ where: { id: tankerRequest.customerUserId } });
+          if (customer) {
+            void notify(ds, {
+              userId: customer.id,
+              audience: "customer",
+              toEmail: customer.email,
+              toPhone: customer.phone,
+              title: "Water tanker request declined",
+              body: [
+                `Hello ${customer.name ?? "Customer"},`,
+                "",
+                `Your request #${saved.id} was declined by ${supplier.fullName}.`,
+                body.comments ? `Reason: ${body.comments}` : null,
+                "",
+                `Water type: ${saved.waterType}`,
+                `Quantity: ${saved.quantityLitres.toLocaleString("en-IN")} L`,
+                `Address: ${saved.deliveryAddress}`,
+                "",
+                "You can search again under Search tankers.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              referenceType: "tanker_request",
+              referenceId: saved.id,
+            });
+          }
+
           return { request: serializeRequest(saved), order: null };
         }
 
-        let vehicle: TankerVehicleEntity | null = null;
-        if (body.vehicleId) {
-          vehicle = await vehicleRepo.findOne({ where: { id: body.vehicleId } });
-          if (!vehicle || vehicle.supplierId !== supplier.id) {
-            return reply.code(400).send({
-              error: { code: "INVALID_VEHICLE", message: "Vehicle not found in your fleet" },
-            });
-          }
-          if (vehicle.status !== TankerVehicleStatus.AVAILABLE) {
-            return reply.code(400).send({
-              error: { code: "VEHICLE_UNAVAILABLE", message: "Vehicle is not available" },
-            });
-          }
+        if (!body.vehicleId) {
+          return reply.code(400).send({
+            error: {
+              code: "VEHICLE_REQUIRED",
+              message: "Select a vehicle to accept this request so the driver is assigned",
+            },
+          });
         }
 
-        const amountInPaise = vehicle?.amountInPaise ?? 0;
+        const vehicle = await vehicleRepo.findOne({ where: { id: body.vehicleId } });
+        if (!vehicle || vehicle.supplierId !== supplier.id) {
+          return reply.code(400).send({
+            error: { code: "INVALID_VEHICLE", message: "Vehicle not found in your fleet" },
+          });
+        }
+        if (vehicle.status !== TankerVehicleStatus.AVAILABLE) {
+          return reply.code(400).send({
+            error: { code: "VEHICLE_UNAVAILABLE", message: "Vehicle is not available" },
+          });
+        }
+
+        const amountInPaise = vehicle.amountInPaise ?? 0;
         const fees = await computeFees(amountInPaise);
 
         tankerRequest.status = TankerRequestStatus.ACCEPTED;
@@ -1378,13 +2542,13 @@ async function main() {
           orderRepo.create({
             customerUserId: tankerRequest.customerUserId,
             supplierId: supplier.id,
-            vehicleId: vehicle?.id ?? null,
+            vehicleId: vehicle.id,
             requestId: tankerRequest.id,
             waterType: tankerRequest.waterType,
-            capacityLitres: vehicle?.capacityLitres ?? tankerRequest.quantityLitres,
-            vehicleNumber: vehicle?.vehicleNumber ?? null,
-            driverName: vehicle?.driverFullName ?? null,
-            driverMobile: vehicle?.driverMobile ?? null,
+            capacityLitres: vehicle.capacityLitres ?? tankerRequest.quantityLitres,
+            vehicleNumber: vehicle.vehicleNumber,
+            driverName: vehicle.driverFullName,
+            driverMobile: vehicle.driverMobile,
             amountInPaise,
             platformFeeInPaise: fees.platformFeeInPaise,
             taxInPaise: fees.taxInPaise,
@@ -1392,20 +2556,134 @@ async function main() {
             totalAmountInPaise: fees.totalAmountInPaise,
             promoCode: fees.promoCode,
             deliveryAddress: tankerRequest.deliveryAddress,
-            deliveryAt: null,
+            deliveryAt: tankerRequest.preferredDeliveryAt ?? null,
             comments: tankerRequest.comments,
             paymentMethod: null,
             paymentStatus: PaymentStatus.PENDING,
+            paymentDueAt: paymentDueAtFrom(),
             status: TankerOrderStatus.SCHEDULED,
             deliveryOtp: null,
             otpVerified: false,
           }),
         );
 
-        if (vehicle) {
-          vehicle.status = TankerVehicleStatus.ON_DELIVERY;
-          await vehicleRepo.save(vehicle);
+        vehicle.status = TankerVehicleStatus.ON_DELIVERY;
+        await vehicleRepo.save(vehicle);
+
+        const customer = await userRepo.findOne({ where: { id: tankerRequest.customerUserId } });
+        const supplierUser = await userRepo.findOne({ where: { id: supplier.userId } });
+        const driverUser = await ensureDriverUser({
+          mobile: vehicle.driverMobile,
+          name: vehicle.driverFullName,
+          email: vehicle.driverEmail,
+        });
+
+        const preferredLabel = tankerRequest.preferredDeliveryAt
+          ? new Date(tankerRequest.preferredDeliveryAt).toLocaleString("en-IN", {
+              timeZone: "Asia/Kolkata",
+            })
+          : "Not specified";
+
+        const acceptDetails = [
+          `Request #${tankerRequest.id}`,
+          `Order #${order.id}`,
+          `Water type: ${tankerRequest.waterType}`,
+          `Quantity / capacity: ${(vehicle.capacityLitres ?? tankerRequest.quantityLitres).toLocaleString("en-IN")} L`,
+          `Preferred delivery: ${preferredLabel}`,
+          `Delivery address: ${tankerRequest.deliveryAddress}`,
+          `Amount: ${formatInr(order.totalAmountInPaise || order.amountInPaise)}`,
+          `Vehicle: ${vehicle.vehicleNumber}`,
+          `Driver: ${vehicle.driverFullName} · ${vehicle.driverMobile}${vehicle.driverEmail ? ` · ${vehicle.driverEmail}` : ""}`,
+          `Supplier: ${supplier.fullName}`,
+        ].join("\n");
+
+        const notifyJobs: Array<Promise<unknown>> = [];
+
+        if (customer) {
+          notifyJobs.push(
+            notify(ds, {
+              userId: customer.id,
+              audience: "customer",
+              toEmail: customer.email,
+              toPhone: customer.phone,
+              title: "Request accepted — pay within 10 minutes",
+              body: [
+                `Hello ${customer.name ?? "Customer"},`,
+                "",
+                `${supplier.fullName} accepted your water tanker request.`,
+                "",
+                acceptDetails,
+                "",
+                "IMPORTANT: Complete payment within 10 minutes.",
+                "If payment is not completed in time, this order will be cancelled automatically and the tanker will be released.",
+                "",
+                "Open My orders now and tap Pay to complete payment.",
+              ].join("\n"),
+              referenceType: "tanker_order",
+              referenceId: order.id,
+            }),
+          );
         }
+
+        if (supplierUser) {
+          notifyJobs.push(
+            notify(ds, {
+              userId: supplierUser.id,
+              audience: "supplier",
+              toEmail: supplier.email ?? supplierUser.email,
+              toPhone: supplier.alternateMobile ?? supplierUser.phone,
+              title: "You accepted a water tanker request",
+              body: [
+                `Hello ${supplier.fullName},`,
+                "",
+                "You accepted a customer request and an order was created.",
+                "",
+                acceptDetails,
+                "",
+                `Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+                customer?.email ? `Customer email: ${customer.email}` : null,
+                "",
+                "Manage it under Supplier → Orders.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              referenceType: "tanker_order",
+              referenceId: order.id,
+            }),
+          );
+        }
+
+        if (driverUser) {
+          notifyJobs.push(
+            notify(ds, {
+              userId: driverUser.id,
+              audience: "driver",
+              toEmail: vehicle.driverEmail ?? driverUser.email,
+              toPhone: vehicle.driverMobile || driverUser.phone,
+              title: "New tanker delivery assigned",
+              body: [
+                `Hello ${vehicle.driverFullName || driverUser.name || "Driver"},`,
+                "",
+                "You have been assigned a water tanker delivery.",
+                "",
+                acceptDetails,
+                "",
+                `Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+                "",
+                "Open the Driver portal to view and update this delivery.",
+              ].join("\n"),
+              referenceType: "tanker_order",
+              referenceId: order.id,
+            }),
+          );
+        } else {
+          app.log.warn(
+            { orderId: order.id, vehicleId: vehicle.id, driverMobile: vehicle.driverMobile },
+            "Accepted request but could not resolve driver user for notify",
+          );
+        }
+
+        await Promise.allSettled(notifyJobs);
 
         return {
           request: serializeRequest(tankerRequest),
@@ -1469,6 +2747,7 @@ async function main() {
             comments: body.comments ?? null,
             paymentMethod: body.paymentMethod ?? null,
             paymentStatus: PaymentStatus.PENDING,
+            paymentDueAt: paymentDueAtFrom(),
             status: TankerOrderStatus.SCHEDULED,
             deliveryOtp: null,
             otpVerified: false,
@@ -1484,6 +2763,7 @@ async function main() {
       });
 
       app.get("/v1/tanker/orders", async (request) => {
+        await releaseExpiredUnpaidOrders(app.log);
         const query = paginationQuerySchema.parse(request.query);
         const raw = request.query as {
           customerUserId?: string;
@@ -1521,6 +2801,118 @@ async function main() {
         };
       });
 
+      app.post("/v1/tanker/orders/:id/assign-vehicle", async (request, reply) => {
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        if (!userId) {
+          return reply.code(401).send({
+            error: { code: "UNAUTHORIZED", message: "Login required" },
+          });
+        }
+
+        const id = parseEntityId((request.params as { id: string }).id);
+        const body = z
+          .object({ vehicleId: z.coerce.number().int().positive() })
+          .parse(request.body);
+
+        const supplier = await supplierRepo.findOne({ where: { userId } });
+        if (!supplier) {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Supplier profile required" },
+          });
+        }
+
+        const order = await orderRepo.findOne({ where: { id } });
+        if (!order || order.supplierId !== supplier.id) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Order not found" },
+          });
+        }
+
+        if (order.vehicleId) {
+          return reply.code(400).send({
+            error: { code: "ALREADY_ASSIGNED", message: "Order already has a vehicle" },
+          });
+        }
+
+        if (
+          order.status === TankerOrderStatus.DELIVERED ||
+          order.status === TankerOrderStatus.CANCELLED
+        ) {
+          return reply.code(400).send({
+            error: { code: "INVALID_STATUS", message: "Cannot assign vehicle to this order" },
+          });
+        }
+
+        const vehicle = await vehicleRepo.findOne({ where: { id: body.vehicleId } });
+        if (!vehicle || vehicle.supplierId !== supplier.id) {
+          return reply.code(400).send({
+            error: { code: "INVALID_VEHICLE", message: "Vehicle not found in your fleet" },
+          });
+        }
+        if (vehicle.status !== TankerVehicleStatus.AVAILABLE) {
+          return reply.code(400).send({
+            error: { code: "VEHICLE_UNAVAILABLE", message: "Vehicle is not available" },
+          });
+        }
+
+        order.vehicleId = vehicle.id;
+        order.vehicleNumber = vehicle.vehicleNumber;
+        order.driverName = vehicle.driverFullName;
+        order.driverMobile = vehicle.driverMobile;
+        order.capacityLitres = vehicle.capacityLitres || order.capacityLitres;
+        order.waterType = vehicle.waterType || order.waterType;
+        if (order.paymentStatus === PaymentStatus.PENDING) {
+          order.paymentDueAt = paymentDueAtFrom();
+        }
+        if (!order.amountInPaise && vehicle.amountInPaise) {
+          const fees = await computeFees(vehicle.amountInPaise);
+          order.amountInPaise = vehicle.amountInPaise;
+          order.platformFeeInPaise = fees.platformFeeInPaise;
+          order.taxInPaise = fees.taxInPaise;
+          order.discountInPaise = fees.discountInPaise;
+          order.totalAmountInPaise = fees.totalAmountInPaise;
+        }
+
+        const saved = await orderRepo.save(order);
+        vehicle.status = TankerVehicleStatus.ON_DELIVERY;
+        await vehicleRepo.save(vehicle);
+
+        const customer = await userRepo.findOne({ where: { id: order.customerUserId } });
+        const driverUser = await ensureDriverUser({
+          mobile: vehicle.driverMobile,
+          name: vehicle.driverFullName,
+          email: vehicle.driverEmail,
+        });
+
+        if (driverUser) {
+          await notify(ds, {
+            userId: driverUser.id,
+            audience: "driver",
+            toEmail: vehicle.driverEmail ?? driverUser.email,
+            toPhone: vehicle.driverMobile || driverUser.phone,
+            title: "New tanker delivery assigned",
+            body: [
+              `Hello ${vehicle.driverFullName || driverUser.name || "Driver"},`,
+              "",
+              "You have been assigned a water tanker delivery.",
+              "",
+              `Order #${saved.id}`,
+              `Vehicle: ${vehicle.vehicleNumber}`,
+              `Water type: ${saved.waterType}`,
+              `Capacity: ${saved.capacityLitres.toLocaleString("en-IN")} L`,
+              `Delivery address: ${saved.deliveryAddress}`,
+              `Customer: ${customer?.name ?? "—"} · ${customer?.phone ?? "—"}`,
+              "",
+              "Open the Driver portal to view and update this delivery.",
+            ].join("\n"),
+            referenceType: "tanker_order",
+            referenceId: saved.id,
+          });
+        }
+
+        return serializeOrder(saved);
+      });
+
       app.patch("/v1/tanker/orders/:id/status", async (request, reply) => {
         const id = parseEntityId((request.params as { id: string }).id);
         const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
@@ -1544,16 +2936,145 @@ async function main() {
               });
             }
           }
+
+          // Drivers cannot progress delivery until the customer has paid.
+          if (order.paymentStatus !== PaymentStatus.PAID) {
+            const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+            const isStaff = roles.includes(UserRole.TANKER_SUPER_ADMIN);
+            const supplier = await supplierRepo.findOne({ where: { id: order.supplierId } });
+            const isSupplierOwner = supplier?.userId === userId;
+            const isDriver = await userIsOrderDriver(userId, order);
+            if (isDriver && !isSupplierOwner && !isStaff) {
+              return reply.code(402).send({
+                error: {
+                  code: "PAYMENT_REQUIRED",
+                  message: "Wait until the customer completes payment before updating delivery status",
+                },
+              });
+            }
+          }
         }
 
+        const needsOtpGate =
+          body.status === TankerOrderStatus.DELIVERING ||
+          body.status === TankerOrderStatus.DELIVERED;
+
+        if (needsOtpGate) {
+          if (order.paymentStatus !== PaymentStatus.PAID) {
+            return reply.code(402).send({
+              error: {
+                code: "PAYMENT_REQUIRED",
+                message: "Customer payment must be completed before delivery OTP / delivering",
+              },
+            });
+          }
+
+          if (!order.otpVerified) {
+            if (body.status === TankerOrderStatus.DELIVERED) {
+              return reply.code(400).send({
+                error: {
+                  code: "OTP_REQUIRED",
+                  message: "Verify customer OTP to set delivering first, then mark delivered",
+                },
+              });
+            }
+            const otp = body.otp?.trim();
+            if (!otp) {
+              return reply.code(400).send({
+                error: {
+                  code: "OTP_REQUIRED",
+                  message: "Enter the customer delivery OTP to move to delivering",
+                },
+              });
+            }
+            if (!order.deliveryOtp || order.deliveryOtp !== otp) {
+              return reply.code(400).send({
+                error: { code: "INVALID_OTP", message: "Invalid delivery OTP" },
+              });
+            }
+            order.otpVerified = true;
+          }
+
+          if (
+            body.status === TankerOrderStatus.DELIVERED &&
+            order.status !== TankerOrderStatus.DELIVERING
+          ) {
+            return reply.code(400).send({
+              error: {
+                code: "DELIVERING_REQUIRED",
+                message: "Set status to delivering (with customer OTP) before marking delivered",
+              },
+            });
+          }
+        }
+
+        const previousStatus = order.status;
         order.status = body.status;
         const saved = await orderRepo.save(order);
+
+        if (previousStatus !== saved.status) {
+          void notifyCustomerOrderStatus(ds, saved, previousStatus).catch((err) => {
+            app.log.error({ err, orderId: saved.id }, "Failed to notify customer of status change");
+          });
+        }
 
         if (body.status === TankerOrderStatus.DELIVERED && order.vehicleId) {
           const vehicle = await vehicleRepo.findOne({ where: { id: order.vehicleId } });
           if (vehicle) {
             vehicle.status = TankerVehicleStatus.AVAILABLE;
             await vehicleRepo.save(vehicle);
+          }
+        }
+
+        if (
+          body.status === TankerOrderStatus.DELIVERED &&
+          previousStatus !== TankerOrderStatus.DELIVERED &&
+          saved.paymentStatus === PaymentStatus.PAID
+        ) {
+          try {
+            await ensureInvoiceForOrder(saved);
+          } catch (err) {
+            app.log.error({ err, orderId: saved.id }, "Failed to ensure invoice on delivery");
+          }
+
+          try {
+            const settled = await settleTankerPaymentToSupplier(saved.id);
+            app.log.info(
+              {
+                orderId: saved.id,
+                supplierShareInPaise: settled.supplierShareInPaise,
+                platformFeeInPaise: settled.platformFeeInPaise,
+                alreadySettled: settled.alreadySettled,
+              },
+              "Settled tanker order to supplier wallet",
+            );
+
+            const supplier = await supplierRepo.findOne({ where: { id: saved.supplierId } });
+            const supplierUser = supplier
+              ? await userRepo.findOne({ where: { id: supplier.userId } })
+              : null;
+            if (supplier && supplierUser && !settled.alreadySettled) {
+              void notify(ds, {
+                userId: supplierUser.id,
+                audience: "supplier",
+                toEmail: supplier.email ?? supplierUser.email,
+                toPhone: supplier.alternateMobile ?? supplierUser.phone,
+                title: "Delivery settled — wallet credited",
+                body: [
+                  `Hello ${supplier.fullName},`,
+                  "",
+                  `Order #${saved.id} was delivered.`,
+                  `Credited to your wallet: ${formatInr(settled.supplierShareInPaise ?? 0)}`,
+                  `Platform fee retained: ${formatInr(settled.platformFeeInPaise ?? 0)}`,
+                  "",
+                  "You can withdraw from Supplier → Wallet.",
+                ].join("\n"),
+                referenceType: "tanker_order",
+                referenceId: saved.id,
+              });
+            }
+          } catch (err) {
+            app.log.error({ err, orderId: saved.id }, "Failed to settle tanker order to supplier wallet");
           }
         }
 
@@ -1584,7 +3105,16 @@ async function main() {
         }
 
         order.otpVerified = true;
+        const previousStatus = order.status;
+        order.status = TankerOrderStatus.DELIVERING;
         const saved = await orderRepo.save(order);
+
+        if (previousStatus !== saved.status) {
+          void notifyCustomerOrderStatus(ds, saved, previousStatus).catch((err) => {
+            app.log.error({ err, orderId: saved.id }, "Failed to notify customer after OTP verify");
+          });
+        }
+
         return serializeOrder(saved);
       });
 
@@ -1592,10 +3122,36 @@ async function main() {
         const id = parseEntityId((request.params as { id: string }).id);
         const body = confirmTankerPaymentSchema.parse(request.body ?? {});
 
+        await releaseExpiredUnpaidOrders(app.log);
+
         const order = await orderRepo.findOne({ where: { id } });
         if (!order) {
           return reply.code(404).send({
             error: { code: "NOT_FOUND", message: "Order not found" },
+          });
+        }
+
+        if (order.status === TankerOrderStatus.CANCELLED) {
+          return reply.code(400).send({
+            error: {
+              code: "ORDER_CANCELLED",
+              message: "This order was cancelled because payment was not completed in time",
+            },
+          });
+        }
+
+        const dueAt = resolvePaymentDueAt(order);
+        if (
+          order.paymentStatus !== PaymentStatus.PAID &&
+          dueAt &&
+          dueAt.getTime() < Date.now()
+        ) {
+          await releaseExpiredUnpaidOrders(app.log);
+          return reply.code(400).send({
+            error: {
+              code: "PAYMENT_WINDOW_EXPIRED",
+              message: "Payment window of 10 minutes has expired. The tanker was released.",
+            },
           });
         }
 
@@ -1613,17 +3169,10 @@ async function main() {
 
         const saved = await orderRepo.save(order);
 
-        const existingInvoice = await invoiceRepo.findOne({ where: { orderId: id } });
-        if (!existingInvoice) {
-          await invoiceRepo.save(
-            invoiceRepo.create({
-              orderId: id,
-              customerUserId: order.customerUserId,
-              supplierId: order.supplierId,
-              amountInPaise: order.totalAmountInPaise || order.amountInPaise,
-              status: PaymentStatus.PAID,
-            }),
-          );
+        try {
+          await ensureInvoiceForOrder(saved);
+        } catch (err) {
+          app.log.error({ err, orderId: saved.id }, "Failed to create tanker invoice after payment");
         }
 
         if (!wasPaid && order.promoCode) {
@@ -1631,6 +3180,14 @@ async function main() {
           if (promo) {
             promo.usedCount += 1;
             await promoRepo.save(promo);
+          }
+        }
+
+        if (!wasPaid) {
+          try {
+            await collectTankerPaymentToPlatform(saved.id);
+          } catch (err) {
+            app.log.error({ err, orderId: saved.id }, "Failed to credit platform wallet after tanker payment");
           }
         }
 
@@ -1694,9 +3251,205 @@ async function main() {
         };
       });
 
+      app.get("/v1/tanker/orders/:id/messages", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        if (!actorId) {
+          return reply.code(401).send({
+            error: { code: "UNAUTHORIZED", message: "Login required" },
+          });
+        }
+
+        const order = await orderRepo.findOne({ where: { id } });
+        if (!order) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Order not found" },
+          });
+        }
+
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+        const isStaff = roles.includes(UserRole.TANKER_SUPER_ADMIN);
+        const party = await userCanChatOnOrder(actorId, order);
+        if (!party && !isStaff) {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Not allowed to view this chat" },
+          });
+        }
+
+        if (!canChatOnTankerOrder(order) && order.status !== TankerOrderStatus.DELIVERED) {
+          return reply.code(400).send({
+            error: {
+              code: "CHAT_UNAVAILABLE",
+              message: "Chat opens after the customer completes payment",
+            },
+          });
+        }
+
+        const rows = await messageRepo.find({
+          where: { orderId: order.id },
+          order: { createdAt: "ASC", id: "ASC" },
+          take: 200,
+        });
+        const senderIds = [...new Set(rows.map((r) => r.senderUserId))];
+        const senders =
+          senderIds.length > 0 ? await userRepo.find({ where: { id: In(senderIds) } }) : [];
+        const nameById = new Map(senders.map((u) => [u.id, u.name ?? null]));
+
+        return {
+          orderId: order.id,
+          canSend: canSendTankerChat(order),
+          items: rows.map((row) =>
+            serializeOrderMessage(row, nameById.get(row.senderUserId) ?? null, actorId),
+          ),
+        };
+      });
+
+      app.post("/v1/tanker/orders/:id/messages", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const actorId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        if (!actorId) {
+          return reply.code(401).send({
+            error: { code: "UNAUTHORIZED", message: "Login required" },
+          });
+        }
+
+        const body = tankerOrderChatMessageSchema.parse(request.body);
+        const order = await orderRepo.findOne({ where: { id } });
+        if (!order) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Order not found" },
+          });
+        }
+
+        const party = await userCanChatOnOrder(actorId, order);
+        if (party !== "customer" && party !== "driver") {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Only customer or driver can chat on this order" },
+          });
+        }
+
+        if (!canSendTankerChat(order)) {
+          return reply.code(400).send({
+            error: {
+              code: "CHAT_CLOSED",
+              message:
+                order.paymentStatus !== PaymentStatus.PAID
+                  ? "Chat opens after payment is completed"
+                  : "Chat is closed for this order",
+            },
+          });
+        }
+
+        const sender = await userRepo.findOne({ where: { id: actorId } });
+        const saved = await messageRepo.save(
+          messageRepo.create({
+            orderId: order.id,
+            senderUserId: actorId,
+            body: body.body,
+          }),
+        );
+
+        // Notify the other party (customer ↔ driver).
+        try {
+          const preview =
+            body.body.length > 120 ? `${body.body.slice(0, 117)}…` : body.body;
+          if (party === "customer") {
+            const driverUser = order.driverMobile
+              ? await ensureDriverUser({
+                  mobile: order.driverMobile,
+                  name: order.driverName,
+                })
+              : null;
+            if (driverUser) {
+              void notify(ds, {
+                userId: driverUser.id,
+                audience: "driver",
+                toEmail: driverUser.email,
+                toPhone: driverUser.phone,
+                title: `New chat · Order #${order.id}`,
+                body: [
+                  `Hello ${driverUser.name ?? "Driver"},`,
+                  "",
+                  `${sender?.name ?? "Customer"} sent a message:`,
+                  preview,
+                  "",
+                  "Open Driver console → Chat to reply.",
+                ].join("\n"),
+                referenceType: "tanker_order",
+                referenceId: order.id,
+              });
+            }
+          } else if (party === "driver" || party === "supplier") {
+            const customer = await userRepo.findOne({ where: { id: order.customerUserId } });
+            if (customer) {
+              void notify(ds, {
+                userId: customer.id,
+                audience: "customer",
+                toEmail: customer.email,
+                toPhone: customer.phone,
+                title: `New chat · Order #${order.id}`,
+                body: [
+                  `Hello ${customer.name ?? "Customer"},`,
+                  "",
+                  `${sender?.name ?? (party === "driver" ? "Driver" : "Supplier")} sent a message:`,
+                  preview,
+                  "",
+                  "Open My orders → Chat to reply.",
+                ].join("\n"),
+                referenceType: "tanker_order",
+                referenceId: order.id,
+              });
+            }
+          }
+        } catch (err) {
+          app.log.warn({ err, orderId: order.id }, "Failed to notify chat recipient");
+        }
+
+        return serializeOrderMessage(saved, sender?.name ?? null, actorId);
+      });
+
       app.get("/v1/tanker/invoices", async (request) => {
         const query = paginationQuerySchema.parse(request.query);
         const raw = request.query as { customerUserId?: string; supplierId?: string };
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+        const isStaff = roles.includes(UserRole.TANKER_SUPER_ADMIN);
+
+        // Backfill invoices for paid orders that somehow missed creation.
+        if (raw.supplierId || raw.customerUserId || (userId && !isStaff)) {
+          const paidQb = orderRepo
+            .createQueryBuilder("o")
+            .where("o.payment_status = :paid", { paid: PaymentStatus.PAID })
+            .orderBy("o.created_at", "DESC")
+            .take(50);
+          if (raw.supplierId) {
+            paidQb.andWhere("o.supplier_id = :supplierId", { supplierId: raw.supplierId });
+          }
+          if (raw.customerUserId) {
+            paidQb.andWhere("o.customer_user_id = :customerUserId", {
+              customerUserId: raw.customerUserId,
+            });
+          }
+          if (userId && !isStaff && !raw.supplierId && !raw.customerUserId) {
+            const ownedSupplier = await supplierRepo.findOne({ where: { userId } });
+            if (ownedSupplier) {
+              paidQb.andWhere("o.supplier_id = :ownedSupplierId", {
+                ownedSupplierId: ownedSupplier.id,
+              });
+            } else {
+              paidQb.andWhere("o.customer_user_id = :selfCustomerId", { selfCustomerId: userId });
+            }
+          }
+          const paidOrders = await paidQb.getMany();
+          for (const paidOrder of paidOrders) {
+            try {
+              await ensureInvoiceForOrder(paidOrder);
+            } catch {
+              /* ignore backfill errors per order */
+            }
+          }
+        }
+
         const qb = invoiceRepo.createQueryBuilder("i").orderBy("i.created_at", "DESC");
 
         if (raw.customerUserId) {
@@ -1706,6 +3459,22 @@ async function main() {
         }
         if (raw.supplierId) {
           qb.andWhere("i.supplier_id = :supplierId", { supplierId: raw.supplierId });
+        }
+
+        // Non-staff callers can only see their own invoices unless staff.
+        if (userId && !isStaff) {
+          const ownedSupplier = await supplierRepo.findOne({ where: { userId } });
+          if (ownedSupplier && !raw.customerUserId) {
+            qb.andWhere("i.supplier_id = :ownedSupplierId", { ownedSupplierId: ownedSupplier.id });
+          } else if (!raw.supplierId) {
+            qb.andWhere("i.customer_user_id = :selfCustomerId", { selfCustomerId: userId });
+          } else if (ownedSupplier && String(ownedSupplier.id) === String(raw.supplierId)) {
+            // allowed
+          } else if (raw.customerUserId && String(raw.customerUserId) === String(userId)) {
+            // allowed
+          } else {
+            qb.andWhere("1 = 0");
+          }
         }
 
         const total = await qb.getCount();
@@ -1721,47 +3490,114 @@ async function main() {
 
       app.get("/v1/tanker/invoices/:id", async (request, reply) => {
         const id = parseEntityId((request.params as { id: string }).id);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
         const row = await invoiceRepo.findOne({ where: { id } });
         if (!row) {
           return reply.code(404).send({
             error: { code: "NOT_FOUND", message: "Invoice not found" },
           });
         }
-        return serializeInvoice(row);
+        if (!(await userCanAccessInvoice(userId, roles, row))) {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Not your invoice" },
+          });
+        }
+        return buildInvoiceDetail(row);
+      });
+
+      app.get("/v1/tanker/invoices/:id/download", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+        const row = await invoiceRepo.findOne({ where: { id } });
+        if (!row) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Invoice not found" },
+          });
+        }
+        if (!(await userCanAccessInvoice(userId, roles, row))) {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Not your invoice" },
+          });
+        }
+
+        const detail = await buildInvoiceDetail(row);
+        const html = renderInvoiceHtml(detail);
+        const filename = `${detail.invoiceNumber}.html`;
+        return reply
+          .header("Content-Type", "text/html; charset=utf-8")
+          .header("Content-Disposition", `attachment; filename="${filename}"`)
+          .send(html);
       });
 
       app.get("/v1/tanker/reports/customers", async (request) => {
         const query = paginationQuerySchema.parse(request.query);
 
-        const totalResult = await orderRepo
-          .createQueryBuilder("o")
-          .select("COUNT(DISTINCT o.customer_user_id)", "cnt")
-          .getRawOne();
-        const total = Number(totalResult?.cnt ?? 0);
+        // Prefer registered tanker customers; also include anyone who placed an order.
+        const qb = userRepo
+          .createQueryBuilder("u")
+          .where(`:customer = ANY(u.roles)`, { customer: UserRole.CUSTOMER })
+          .orderBy("u.created_at", "DESC");
 
-        const rows = await orderRepo
-          .createQueryBuilder("o")
-          .select("o.customer_user_id", "customerUserId")
-          .addSelect("COUNT(*)", "ordersCount")
-          .addSelect("MAX(o.created_at)", "lastOrderAt")
-          .addSelect(
-            `COALESCE(SUM(CASE WHEN o.payment_status = :paid THEN o.total_amount_in_paise ELSE 0 END), 0)`,
-            "totalPaidInPaise",
-          )
-          .setParameter("paid", PaymentStatus.PAID)
-          .groupBy("o.customer_user_id")
-          .orderBy("MAX(o.created_at)", "DESC")
-          .offset((query.page - 1) * query.limit)
-          .limit(query.limit)
-          .getRawMany();
+        if (query.q) {
+          qb.andWhere(
+            `(u.phone ILIKE :q OR COALESCE(u.name,'') ILIKE :q OR COALESCE(u.email,'') ILIKE :q)`,
+            { q: `%${query.q}%` },
+          );
+        }
+
+        const total = await qb.getCount();
+        const users = await qb.skip((query.page - 1) * query.limit).take(query.limit).getMany();
+
+        const statsByUser = new Map<
+          number,
+          { ordersCount: number; totalPaidInPaise: number; lastOrderAt: string | null }
+        >();
+
+        if (users.length > 0) {
+          const ids = users.map((u) => u.id);
+          const rows = await orderRepo
+            .createQueryBuilder("o")
+            .select("o.customer_user_id", "customerUserId")
+            .addSelect("COUNT(*)", "ordersCount")
+            .addSelect("MAX(o.created_at)", "lastOrderAt")
+            .addSelect(
+              `COALESCE(SUM(CASE WHEN o.payment_status = :paid THEN o.total_amount_in_paise ELSE 0 END), 0)`,
+              "totalPaidInPaise",
+            )
+            .where("o.customer_user_id IN (:...ids)", { ids })
+            .setParameter("paid", PaymentStatus.PAID)
+            .groupBy("o.customer_user_id")
+            .getRawMany();
+
+          for (const row of rows) {
+            statsByUser.set(Number(row.customerUserId), {
+              ordersCount: Number(row.ordersCount),
+              totalPaidInPaise: Number(row.totalPaidInPaise),
+              lastOrderAt: row.lastOrderAt
+                ? toIsoRequired(new Date(row.lastOrderAt as string))
+                : null,
+            });
+          }
+        }
 
         return {
-          items: rows.map((row) => ({
-            customerUserId: row.customerUserId as string,
-            ordersCount: Number(row.ordersCount),
-            lastOrderAt: toIsoRequired(new Date(row.lastOrderAt as string)),
-            totalPaidInPaise: Number(row.totalPaidInPaise),
-          })),
+          items: users.map((u) => {
+            const stats = statsByUser.get(u.id);
+            return {
+              customerUserId: u.id,
+              name: u.name,
+              phone: u.phone,
+              email: u.email,
+              isActive: u.isActive,
+              city: u.city,
+              createdAt: toIsoRequired(u.createdAt),
+              ordersCount: stats?.ordersCount ?? 0,
+              lastOrderAt: stats?.lastOrderAt ?? null,
+              totalPaidInPaise: stats?.totalPaidInPaise ?? 0,
+            };
+          }),
           page: query.page,
           limit: query.limit,
           total,

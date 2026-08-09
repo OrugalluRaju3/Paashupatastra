@@ -99,6 +99,10 @@ export class TankerOrderEntity {
   @Column({ name: "driver_location_updated_at", type: "timestamptz", nullable: true })
   driverLocationUpdatedAt!: Date | null;
 
+  /** Customer must pay before this instant or the tanker is released. */
+  @Column({ name: "payment_due_at", type: "timestamptz", nullable: true })
+  paymentDueAt!: Date | null;
+
   @CreateDateColumn({ name: "created_at", type: "timestamptz" })
   createdAt!: Date;
 

@@ -13,6 +13,7 @@ async function main() {
       upstream: envString("NOTIFICATIONS_URL", "http://localhost:3006"),
     },
     { prefix: "/v1/tanker", upstream: envString("TANKER_URL", "http://localhost:3007") },
+    { prefix: "/v1/content", upstream: envString("CONTENT_URL", "http://localhost:3008") },
   ];
 
   await createService({

@@ -50,6 +50,8 @@ export function WalletPage() {
   const toast = useToast();
   const { intent, user } = useAuth();
   const isOwner = intent === "owner";
+  const isSupplier = intent === "supplier";
+  const canWithdraw = isOwner || isSupplier;
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [items, setItems] = useState<Txn[]>([]);
   const [page, setPage] = useState(1);
@@ -76,7 +78,7 @@ export function WalletPage() {
       setTotal(tx.total);
       setTotalPages(tx.totalPages);
 
-      if (isOwner) {
+      if (canWithdraw) {
         const bankRes = await api.get<{ items: BankAccount[] }>("/users/me/bank-accounts");
         setBanks(bankRes.items);
         setSelectedBankId((prev) => {
@@ -92,7 +94,7 @@ export function WalletPage() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load wallet");
     }
-  }, [page, toast, isOwner, user?.name]);
+  }, [page, toast, canWithdraw, user?.name]);
 
   useEffect(() => {
     void load();
@@ -168,11 +170,13 @@ export function WalletPage() {
     <>
       <div className="topbar">
         <div>
-          <h2>{isOwner ? "Owner wallet" : "My wallet"}</h2>
+          <h2>{isSupplier ? "Supplier wallet" : isOwner ? "Owner wallet" : "My wallet"}</h2>
           <p>
-            {isOwner
-              ? "Available balance is only credited after customer check-out (minus platform fee). Until then, payment stays in the admin/platform wallet."
-              : "Payments you made for parking bookings. Funds are held in the platform wallet until check-out."}
+            {isSupplier
+              ? "Customer payments are held in the admin wallet until delivery completes. Then platform fee is kept and the rest is credited here for withdrawal."
+              : isOwner
+                ? "Available balance is only credited after customer check-out (minus platform fee). Until then, payment stays in the admin/platform wallet."
+                : "Payments you made for parking bookings. Funds are held in the platform wallet until check-out."}
           </p>
         </div>
         <button type="button" className="btn btn-ghost" onClick={() => void load()}>
@@ -185,24 +189,30 @@ export function WalletPage() {
           label="Available balance"
           value={wallet ? formatInrFromPaise(wallet.balanceInPaise) : "—"}
           hint={
-            isOwner
-              ? "Withdrawable after check-out settlements"
+            canWithdraw
+              ? isSupplier
+                ? "Withdrawable after delivery settlements"
+                : "Withdrawable after check-out settlements"
               : wallet
                 ? `${wallet.type} wallet · ${wallet.currency}`
                 : undefined
           }
         />
-        {isOwner ? (
+        {canWithdraw ? (
           <KpiCard
             label="Pending (in admin wallet)"
             value={wallet ? formatInrFromPaise(wallet.pendingSettlementInPaise ?? 0) : "—"}
-            hint="Paid bookings not yet checked out"
+            hint={
+              isSupplier
+                ? "Paid orders not yet delivered"
+                : "Paid bookings not yet checked out"
+            }
           />
         ) : null}
         <KpiCard label="Transactions" value={total} hint="All ledger entries" />
       </div>
 
-      {isOwner ? (
+      {canWithdraw ? (
         <section className="panel">
           <div className="panel-head">
             <h3>Withdraw to bank</h3>
@@ -396,9 +406,11 @@ export function WalletPage() {
               {items.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="empty">
-                    {isOwner
-                      ? "No payouts yet. After a customer checks out, settlement appears here."
-                      : "No payments yet. Book and pay for a parking slot to see activity."}
+                    {isSupplier
+                      ? "No payouts yet. After a delivery completes, settlement appears here."
+                      : isOwner
+                        ? "No payouts yet. After a customer checks out, settlement appears here."
+                        : "No payments yet. Book and pay for a parking slot to see activity."}
                   </td>
                 </tr>
               ) : null}

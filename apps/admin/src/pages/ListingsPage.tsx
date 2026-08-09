@@ -10,6 +10,12 @@ import { Pagination } from "../components/Pagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import {
+  DEFAULT_PARKING_VEHICLE_TYPES,
+  PARKING_VEHICLE_TYPE_OPTIONS,
+  labelParkingVehicleType,
+  toggleParkingVehicleType,
+} from "../lib/parkingVehicleTypes";
 
 type Listing = {
   id: string;
@@ -22,6 +28,7 @@ type Listing = {
   addressLine?: string | null;
   parkingSlotNumber: string;
   parkingType: string;
+  vehicleTypesAllowed?: string[];
   status: string;
   priceInPaise: number;
   rentType?: string;
@@ -87,6 +94,7 @@ const emptyParkingForm = {
   longitude: "",
   parkingSlotNumber: "",
   parkingType: "covered",
+  vehicleTypesAllowed: [...DEFAULT_PARKING_VEHICLE_TYPES] as string[],
   availabilityStartTime: "06:00",
   availabilityEndTime: "22:00",
   availableDays: "all_days",
@@ -189,6 +197,10 @@ export function ListingsPage() {
       toast.error("Enter valid latitude and longitude");
       return;
     }
+    if (parkingForm.vehicleTypesAllowed.length === 0) {
+      toast.error("Select at least one vehicle type (car, bike, auto, or EV)");
+      return;
+    }
 
     const slotProof = docs.parkingAllocationProofUrl;
     const parkingPhoto = docs.parkingPhotoUrl || slotProof;
@@ -211,7 +223,10 @@ export function ListingsPage() {
         longitude: lng,
         parkingSlotNumber: parkingForm.parkingSlotNumber.trim(),
         parkingType: parkingForm.parkingType,
-        vehicleTypesAllowed: ["car"],
+        vehicleTypesAllowed:
+          parkingForm.vehicleTypesAllowed.length > 0
+            ? parkingForm.vehicleTypesAllowed
+            : [...DEFAULT_PARKING_VEHICLE_TYPES],
         numberOfSlots: 1,
         availabilityStartTime: parkingForm.availabilityStartTime,
         availabilityEndTime: parkingForm.availabilityEndTime,
@@ -342,6 +357,11 @@ export function ListingsPage() {
                   ) : null}
                   <td>
                     {item.parkingSlotNumber} · {item.parkingType}
+                    {item.vehicleTypesAllowed?.length ? (
+                      <div style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                        {item.vehicleTypesAllowed.map(labelParkingVehicleType).join(", ")}
+                      </div>
+                    ) : null}
                   </td>
                   <td>
                     {formatInrFromPaise(item.priceInPaise)}
@@ -499,6 +519,41 @@ export function ListingsPage() {
                 </select>
               </div>
             </div>
+            <fieldset className="field" style={{ border: 0, padding: 0 }}>
+              <legend style={{ fontWeight: 600, marginBottom: "0.35rem" }}>Vehicles allowed</legend>
+              <p style={{ margin: "0 0 0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                Select car, bike, auto, and/or EV for this slot.
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1.25rem" }}>
+                {PARKING_VEHICLE_TYPE_OPTIONS.map((opt) => {
+                  const checked = parkingForm.vehicleTypesAllowed.includes(opt.value);
+                  return (
+                    <label
+                      key={opt.value}
+                      htmlFor={`listing-vtype-${opt.value}`}
+                      style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                    >
+                      <input
+                        id={`listing-vtype-${opt.value}`}
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) =>
+                          setParkingForm({
+                            ...parkingForm,
+                            vehicleTypesAllowed: toggleParkingVehicleType(
+                              parkingForm.vehicleTypesAllowed,
+                              opt.value,
+                              e.target.checked,
+                            ),
+                          })
+                        }
+                      />
+                      {opt.label}
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
             <div className="field">
               <label>Address</label>
               <input
@@ -668,6 +723,12 @@ export function ListingsPage() {
               <strong>Parking</strong>
               <p>
                 Slot {listing.parkingSlotNumber} · {listing.parkingType}
+                {listing.vehicleTypesAllowed?.length ? (
+                  <span style={{ color: "var(--muted)" }}>
+                    {" "}
+                    · {listing.vehicleTypesAllowed.map(labelParkingVehicleType).join(", ")}
+                  </span>
+                ) : null}
                 <br />
                 {formatInrFromPaise(listing.priceInPaise)} ({listing.rentType ?? "-"})
                 <br />
