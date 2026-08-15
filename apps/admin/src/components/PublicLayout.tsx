@@ -11,8 +11,12 @@ export function PublicLayout() {
   const isDriver = intent === "driver";
   const isProvider = intent === "provider";
   const isWorker = intent === "worker";
+  const isResident = intent === "resident";
+  const isSociety = intent === "society";
+  const isGuard = intent === "guard";
   const isTankerModule = module === "tanker";
   const isSevaModule = module === "seva";
+  const isCommunityModule = module === "community";
 
   const helpLinks = [
     { to: "/app/help/faq", label: "FAQs" },
@@ -71,6 +75,33 @@ export function PublicLayout() {
                     { to: "/app/seva/invoices", label: "Invoices" },
                     ...helpLinks,
                   ]
+                : isGuard
+                  ? [
+                      { to: "/app/gate", label: "Gate", end: true },
+                      { to: "/app/gate/residents", label: "Residents" },
+                      ...helpLinks,
+                    ]
+                  : isSociety
+                    ? [
+                        { to: "/app/society", label: "Home", end: true },
+                        { to: "/app/society/units", label: "Units" },
+                        { to: "/app/society/members", label: "Members" },
+                        { to: "/app/society/notices", label: "Notices" },
+                        { to: "/app/society/complaints", label: "Complaints" },
+                        { to: "/app/society/visitors", label: "Visitors" },
+                        { to: "/app/society/expenses", label: "Expenses" },
+                        ...helpLinks,
+                      ]
+                    : isCommunityModule || isResident
+                      ? [
+                          { to: "/app/community", label: "Home", end: true },
+                          { to: "/app/community/notices", label: "Notices" },
+                          { to: "/app/community/expenses", label: "Expenses" },
+                          { to: "/app/community/complaints", label: "Complaints" },
+                          { to: "/app/community/visitors", label: "Visitors" },
+                          { to: "/app/community/guards", label: "Guards" },
+                          ...helpLinks,
+                        ]
                 : [
                     { to: "/app/customer", label: "Home", end: true },
                     { to: "/app/customer/search", label: "Search parking" },
@@ -83,7 +114,13 @@ export function PublicLayout() {
   function onLogout() {
     logout();
     navigate(
-      module === "tanker" ? "/login/tanker" : module === "seva" ? "/login/seva" : "/login/parking",
+      module === "tanker"
+        ? "/login/tanker"
+        : module === "seva"
+          ? "/login/seva"
+          : module === "community"
+            ? "/login/community"
+            : "/login/parking",
     );
   }
 
@@ -101,6 +138,12 @@ export function PublicLayout() {
               ? "Tanker customer portal"
               : isSevaModule
                 ? "Seva customer portal"
+                : isGuard
+                  ? "Gate portal"
+                  : isSociety
+                    ? "Apartment admin portal"
+                    : isCommunityModule
+                      ? "Resident portal"
                 : "Customer portal";
   const roleLabel = isDriver
     ? "Tanker driver"
@@ -116,6 +159,12 @@ export function PublicLayout() {
               ? "Tanker customer"
               : isSevaModule
                 ? "Seva customer"
+                : isGuard
+                  ? "Community guard"
+                  : isSociety
+                    ? "Apartment admin"
+                    : isCommunityModule
+                      ? "Resident"
                 : "Customer";
   const kicker = isDriver
     ? "Driver"

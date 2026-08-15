@@ -16,7 +16,13 @@ export function RequireAuth({ portal }: { portal: PortalKind }) {
   if (activePortal !== portal) {
     if (portal === "staff") {
       const staffModule =
-        module === "tanker" ? "tanker" : module === "seva" ? "seva" : "parking";
+        module === "tanker"
+          ? "tanker"
+          : module === "seva"
+            ? "seva"
+            : module === "community"
+              ? "community"
+              : "parking";
       return <Navigate to={`/staff/login/${staffModule}`} replace />;
     }
     return <Navigate to="/" replace />;

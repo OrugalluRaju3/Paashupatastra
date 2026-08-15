@@ -24,7 +24,7 @@ export const userSchema = z.object({
 
 export type User = z.infer<typeof userSchema>;
 
-export const authModuleSchema = z.enum(["parking", "tanker", "seva"]);
+export const authModuleSchema = z.enum(["parking", "tanker", "seva", "community"]);
 
 export type AuthModule = z.infer<typeof authModuleSchema>;
 

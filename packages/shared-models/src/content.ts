@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { optionalPhoneSchema } from "./user";
 
-export const contentModuleSchema = z.enum(["parking", "tanker", "seva"]);
+export const contentModuleSchema = z.enum(["parking", "tanker", "seva", "community"]);
 export type ContentModule = z.infer<typeof contentModuleSchema>;
 
 export const termsAudienceSchema = z.enum([
@@ -11,6 +11,9 @@ export const termsAudienceSchema = z.enum([
   "tanker_driver",
   "seva_provider",
   "seva_worker",
+  "resident",
+  "apartment_admin",
+  "community_guard",
 ]);
 export type TermsAudience = z.infer<typeof termsAudienceSchema>;
 
@@ -23,6 +26,10 @@ export const announcementAudienceSchema = z.enum([
   "seva_providers",
   "seva_workers",
   "seva_admins",
+  "residents",
+  "apartment_admins",
+  "community_guards",
+  "community_admins",
 ]);
 export type AnnouncementAudience = z.infer<typeof announcementAudienceSchema>;
 

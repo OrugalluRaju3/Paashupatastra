@@ -42,6 +42,10 @@ import {
 
   isSevaSuperAdmin,
 
+  isCommunityStaff,
+
+  isCommunitySuperAdmin,
+
 } from "./types";
 
 
@@ -425,7 +429,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       });
 
-      if (authModule === "tanker") {
+      if (authModule === "tanker" || authModule === "community" || authModule === "seva") {
 
         const refreshed = await api.post<{ accessToken: string; user: AuthUser }>(
 
@@ -555,6 +559,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearSession();
 
           throw new Error("This account does not have Seva Super Admin role.");
+
+        }
+
+      } else if (authModule === "community") {
+
+        if (!isCommunityStaff(loggedIn)) {
+
+          clearSession();
+
+          throw new Error(
+
+            "This account is not Community staff. Ask Community Super Admin to add staff role.",
+
+          );
+
+        }
+
+
+
+        if (staffIntent === "community_super_admin" && !isCommunitySuperAdmin(loggedIn)) {
+
+          clearSession();
+
+          throw new Error("This account does not have Community Super Admin role.");
 
         }
 

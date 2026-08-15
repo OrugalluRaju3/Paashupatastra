@@ -16,9 +16,21 @@ const sendNotificationSchema = z.object({
   title: z.string().min(1).max(160),
   body: z.string().min(1).max(8000),
   channel: z.enum(["push", "sms", "email", "in_app"]).default("push"),
-  module: z.enum(["parking", "tanker"]).optional().nullable(),
+  module: z.enum(["parking", "tanker", "seva", "community"]).optional().nullable(),
   audience: z
-    .enum(["customer", "supplier", "driver", "admin", "owner", "staff"])
+    .enum([
+      "customer",
+      "supplier",
+      "driver",
+      "admin",
+      "owner",
+      "staff",
+      "provider",
+      "worker",
+      "resident",
+      "apartment_admin",
+      "guard",
+    ])
     .optional()
     .nullable(),
   toEmail: z.string().email().optional(),

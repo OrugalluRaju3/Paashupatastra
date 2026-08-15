@@ -1,13 +1,13 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api, qs } from "../api";
 import { useAuth } from "../auth/AuthContext";
-import { isParkingSuperAdmin, isSevaSuperAdmin, isTankerSuperAdmin } from "../auth/types";
+import { isCommunitySuperAdmin, isParkingSuperAdmin, isSevaSuperAdmin, isTankerSuperAdmin } from "../auth/types";
 import { Modal } from "../components/Modal";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
 import { digitsPhone } from "../lib/phone";
 
-type Module = "parking" | "tanker" | "seva";
+type Module = "parking" | "tanker" | "seva" | "community";
 type Tab = "privacy" | "terms" | "faqs" | "support" | "announcements";
 type CreateKind = "privacy" | "terms" | "faq" | "announcement";
 
@@ -63,6 +63,9 @@ const TERMS_AUDIENCES = [
   { id: "tanker_driver", label: "Driver" },
   { id: "seva_provider", label: "Housekeeping provider" },
   { id: "seva_worker", label: "Housekeeping worker" },
+  { id: "resident", label: "Resident" },
+  { id: "apartment_admin", label: "Apartment admin" },
+  { id: "community_guard", label: "Community guard" },
 ] as const;
 
 const ANN_AUDIENCES = [
@@ -74,11 +77,16 @@ const ANN_AUDIENCES = [
   { id: "seva_providers", label: "Housekeeping providers" },
   { id: "seva_workers", label: "Housekeeping workers" },
   { id: "seva_admins", label: "Seva admins" },
+  { id: "residents", label: "Residents" },
+  { id: "apartment_admins", label: "Apartment admins" },
+  { id: "community_guards", label: "Community guards" },
+  { id: "community_admins", label: "Community admins" },
 ] as const;
 
 function moduleLabel(m: Module) {
   if (m === "parking") return "Parking";
   if (m === "tanker") return "Water tanker";
+  if (m === "community") return "Community";
   return "Housekeeping";
 }
 
@@ -121,8 +129,11 @@ export function ContentCmsPage() {
   const canParking = isParkingSuperAdmin(user);
   const canTanker = isTankerSuperAdmin(user);
   const canSeva = isSevaSuperAdmin(user);
+  const canCommunity = isCommunitySuperAdmin(user);
   const defaultModule: Module =
-    authModule === "seva" && canSeva
+    authModule === "community" && canCommunity
+      ? "community"
+      : authModule === "seva" && canSeva
       ? "seva"
       : authModule === "tanker" && canTanker
         ? "tanker"
@@ -130,7 +141,9 @@ export function ContentCmsPage() {
           ? "parking"
           : canTanker
             ? "tanker"
-            : "seva";
+            : canSeva
+              ? "seva"
+            : "community";
 
   const [module, setModule] = useState<Module>(defaultModule);
   const [tab, setTab] = useState<Tab>("privacy");
@@ -144,10 +157,11 @@ export function ContentCmsPage() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (authModule === "seva" && canSeva) setModule("seva");
+    if (authModule === "community" && canCommunity) setModule("community");
+    else if (authModule === "seva" && canSeva) setModule("seva");
     else if (authModule === "tanker" && canTanker) setModule("tanker");
     else if (authModule === "parking" && canParking) setModule("parking");
-  }, [authModule, canParking, canTanker, canSeva]);
+  }, [authModule, canParking, canTanker, canSeva, canCommunity]);
 
   const [policyForm, setPolicyForm] = useState(emptyPolicyForm);
   const [termsForm, setTermsForm] = useState({
@@ -181,6 +195,11 @@ export function ContentCmsPage() {
         (a) => a.id === "customer" || a.id === "seva_provider" || a.id === "seva_worker",
       );
     }
+    if (module === "community") {
+      return TERMS_AUDIENCES.filter(
+        (a) => a.id === "resident" || a.id === "apartment_admin" || a.id === "community_guard",
+      );
+    }
     return TERMS_AUDIENCES.filter(
       (a) => a.id === "customer" || a.id === "tanker_supplier" || a.id === "tanker_driver",
     );
@@ -197,6 +216,15 @@ export function ContentCmsPage() {
           a.id === "seva_providers" ||
           a.id === "seva_workers" ||
           a.id === "seva_admins",
+      );
+    }
+    if (module === "community") {
+      return ANN_AUDIENCES.filter(
+        (a) =>
+          a.id === "residents" ||
+          a.id === "apartment_admins" ||
+          a.id === "community_guards" ||
+          a.id === "community_admins",
       );
     }
     return ANN_AUDIENCES.filter(
@@ -425,7 +453,7 @@ export function ContentCmsPage() {
     }
   }
 
-  if (!canParking && !canTanker && !canSeva) {
+  if (!canParking && !canTanker && !canSeva && !canCommunity) {
     return <p className="error">Only a module Super Admin can manage content.</p>;
   }
 
@@ -451,6 +479,7 @@ export function ContentCmsPage() {
           {(canParking ? (["parking"] as Module[]) : [])
             .concat(canTanker ? (["tanker"] as Module[]) : [])
             .concat(canSeva ? (["seva"] as Module[]) : [])
+            .concat(canCommunity ? (["community"] as Module[]) : [])
             .map((m) => (
               <button
                 key={m}

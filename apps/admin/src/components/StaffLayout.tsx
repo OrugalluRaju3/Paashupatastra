@@ -1,12 +1,13 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
-import { isSevaSuperAdmin, isTankerSuperAdmin } from "../auth/types";
+import { isCommunitySuperAdmin, isSevaSuperAdmin, isTankerSuperAdmin } from "../auth/types";
 import { AppHeader } from "./AppHeader";
 
 const ROLE_LABEL: Record<string, string> = {
   parking_super_admin: "Parking super admin",
   tanker_super_admin: "Tanker super admin",
   seva_super_admin: "Seva super admin",
+  community_super_admin: "Community super admin",
   super_admin: "Super admin",
   verification_manager: "Verification manager",
   field_executive: "Field executive",
@@ -65,6 +66,11 @@ const sevaOpsLinks: StaffNavLink[] = [
   { to: "/staff/seva", label: "Housekeeping", roles: ["seva_super_admin"] },
   { to: "/staff/content", label: "Content", roles: ["seva_super_admin"] },
 ];
+
+const communityOpsLinks: StaffNavLink[] = [
+  { to: "/staff/community", label: "Community", roles: ["community_super_admin"] },
+  { to: "/staff/content", label: "Content", roles: ["community_super_admin"] },
+];
 const staffOnlyLinks: StaffNavLink[] = [
   { to: "/staff/users", label: "Staff users", end: true, roles: parkingSuperRoles },
 ];
@@ -85,16 +91,30 @@ function filterSevaLinks(links: StaffNavLink[], roles: string[]) {
   );
 }
 
+function filterCommunityLinks(links: StaffNavLink[], roles: string[]) {
+  return links.filter(
+    (l) => isCommunitySuperAdmin({ roles }) || l.roles.some((r) => roles.includes(r)),
+  );
+}
+
 export function StaffLayout() {
   const { user, logout, intent, module } = useAuth();
   const navigate = useNavigate();
   const roles = user?.roles ?? [];
   const staffModule =
-    module === "tanker" ? "tanker" : module === "seva" ? "seva" : "parking";
+    module === "tanker"
+      ? "tanker"
+      : module === "seva"
+        ? "seva"
+        : module === "community"
+          ? "community"
+          : "parking";
 
   const parkingLinks = staffModule === "parking" ? filterParkingLinks(parkingOpsLinks, roles) : [];
   const tankerLinks = staffModule === "tanker" ? filterTankerLinks(tankerOpsLinks, roles) : [];
   const sevaLinks = staffModule === "seva" ? filterSevaLinks(sevaOpsLinks, roles) : [];
+  const communityLinks =
+    staffModule === "community" ? filterCommunityLinks(communityOpsLinks, roles) : [];
   const adminLinks = staffModule === "parking" ? filterParkingLinks(staffOnlyLinks, roles) : [];
 
   function onLogout() {
@@ -112,7 +132,9 @@ export function StaffLayout() {
       ? "Tanker staff"
       : staffModule === "seva"
         ? "Seva staff"
-        : "Parking staff";
+        : staffModule === "community"
+          ? "Community staff"
+          : "Parking staff";
 
   return (
     <div className="app-shell">
@@ -157,6 +179,16 @@ export function StaffLayout() {
               ))}
             </>
           ) : null}
+          {communityLinks.length > 0 ? (
+            <>
+              <p className="nav-section-label">Community ops</p>
+              {communityLinks.map((link) => (
+                <NavLink key={link.to} to={link.to} end={link.end}>
+                  <span>{link.label}</span>
+                </NavLink>
+              ))}
+            </>
+          ) : null}
           {adminLinks.length > 0 ? (
             <>
               <p className="nav-section-label">Administration</p>
@@ -173,6 +205,8 @@ export function StaffLayout() {
             ? "Manage tanker suppliers, drivers, and deliveries."
             : staffModule === "seva"
               ? "Manage housekeeping providers, workers, and bookings."
+              : staffModule === "community"
+                ? "Manage apartments, memberships, notices, and society ledgers."
               : "Verify listings, manage bookings, and keep the marketplace healthy."}
         </p>
       </aside>
@@ -183,6 +217,8 @@ export function StaffLayout() {
               ? "Tanker staff console"
               : staffModule === "seva"
                 ? "Seva staff console"
+                : staffModule === "community"
+                  ? "Community staff console"
                 : "Parking staff console"
           }
           userName={user?.name}

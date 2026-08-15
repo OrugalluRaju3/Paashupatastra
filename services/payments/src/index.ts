@@ -2,6 +2,7 @@ import "reflect-metadata";
 import {
   BankAccountEntity,
   CommissionConfigEntity,
+  CommunityDueEntity,
   ParkingBookingEntity,
   SevaBookingEntity,
   SevaProviderEntity,
@@ -31,12 +32,14 @@ import {
   appPublicUrl,
   bookingIdFromCashfreeOrderId,
   cashfreeConfig,
+  communityDueIdFromCashfreeOrderId,
   createCashfreeOrder,
   gatewayPublicUrl,
   getCashfreeOrder,
   isCashfreePaid,
   sevaBookingIdFromCashfreeOrderId,
   tankerOrderIdFromCashfreeOrderId,
+  toCashfreeCommunityDueId,
   toCashfreeOrderId,
   toCashfreeSevaBookingId,
   toCashfreeTankerOrderId,
@@ -47,18 +50,21 @@ const paymentOrderTargetBaseSchema = z.object({
   bookingId: z.coerce.number().int().positive().optional(),
   tankerOrderId: z.coerce.number().int().positive().optional(),
   sevaBookingId: z.coerce.number().int().positive().optional(),
+  communityDueId: z.coerce.number().int().positive().optional(),
 });
 
 function exactlyOnePaymentTarget(d: {
   bookingId?: number;
   tankerOrderId?: number;
   sevaBookingId?: number;
+  communityDueId?: number;
 }) {
-  return [d.bookingId, d.tankerOrderId, d.sevaBookingId].filter((v) => v != null).length === 1;
+  return [d.bookingId, d.tankerOrderId, d.sevaBookingId, d.communityDueId].filter((v) => v != null)
+    .length === 1;
 }
 
 const paymentOrderTargetSchema = paymentOrderTargetBaseSchema.refine(exactlyOnePaymentTarget, {
-  message: "Provide exactly one of bookingId, tankerOrderId, or sevaBookingId",
+  message: "Provide exactly one of bookingId, tankerOrderId, sevaBookingId, or communityDueId",
 });
 
 const paymentOrderVerifySchema = paymentOrderTargetBaseSchema
@@ -66,7 +72,7 @@ const paymentOrderVerifySchema = paymentOrderTargetBaseSchema
     orderId: z.string().min(3).optional(),
   })
   .refine(exactlyOnePaymentTarget, {
-    message: "Provide exactly one of bookingId, tankerOrderId, or sevaBookingId",
+    message: "Provide exactly one of bookingId, tankerOrderId, sevaBookingId, or communityDueId",
   });
 
 function tankerOrderAmountInPaise(order: TankerOrderEntity) {
@@ -83,6 +89,10 @@ function tankerServiceUrl() {
 
 function sevaServiceUrl() {
   return (process.env.SEVA_URL ?? "http://localhost:3009").replace(/\/$/, "");
+}
+
+function communitiesServiceUrl() {
+  return (process.env.COMMUNITIES_URL ?? "http://localhost:3003").replace(/\/$/, "");
 }
 
 type TankerCustomerLike = Pick<TankerUserEntity, "id" | "phone" | "email" | "name">;
@@ -136,6 +146,30 @@ async function confirmSevaPayment(
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
     throw new Error(data?.error?.message ?? `Seva confirm failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function confirmCommunityDuePayment(
+  communityDueId: number,
+  residentUserId: number,
+  orderId: string,
+  source: string,
+) {
+  const res = await fetch(
+    `${communitiesServiceUrl()}/v1/community/dues/${communityDueId}/confirm-payment`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-user-id": String(residentUserId),
+      },
+      body: JSON.stringify({ orderId, source }),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new Error(data?.error?.message ?? `Community confirm failed (${res.status})`);
   }
   return res.json();
 }
@@ -653,6 +687,7 @@ async function main() {
   const tankerUserRepo = ds.getRepository(TankerUserEntity);
   const tankerSupplierRepo = ds.getRepository(TankerSupplierEntity);
   const sevaBookingRepo = ds.getRepository(SevaBookingEntity);
+  const communityDueRepo = ds.getRepository(CommunityDueEntity);
   const sevaProviderRepo = ds.getRepository(SevaProviderEntity);
   const userRepo = ds.getRepository(UserEntity);
   const bankRepo = ds.getRepository(BankAccountEntity);
@@ -1200,6 +1235,84 @@ async function main() {
           }
         }
 
+        if (body.communityDueId) {
+          const due = await communityDueRepo.findOne({ where: { id: body.communityDueId } });
+          if (!due) {
+            return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Community due not found" } });
+          }
+          if (due.residentUserId !== userId) {
+            return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your maintenance due" } });
+          }
+          if (due.paymentStatus === "paid" || due.status === "paid") {
+            return reply.code(400).send({
+              error: { code: "ALREADY_PAID", message: "This maintenance due is already paid" },
+            });
+          }
+          if (due.status === "cancelled") {
+            return reply.code(400).send({
+              error: { code: "CANCELLED", message: "This due was cancelled" },
+            });
+          }
+
+          const customer = await userRepo.findOne({ where: { id: due.residentUserId } });
+          if (!customer?.phone) {
+            return reply.code(400).send({
+              error: { code: "CUSTOMER_PHONE_REQUIRED", message: "Customer phone is required for Cashfree" },
+            });
+          }
+
+          const orderId = toCashfreeCommunityDueId(due.id);
+          const amountInPaise = due.amountInPaise;
+          const amountInr = amountInPaise / 100;
+          const returnUrl = `${appPublicUrl()}/app/community/payment/return?community_due_id=${due.id}&order_id={order_id}`;
+          const notifyUrl = `${gatewayPublicUrl()}/v1/payments/webhooks/cashfree`;
+
+          try {
+            let cashfreeOrder;
+            try {
+              cashfreeOrder = await createCashfreeOrder({
+                orderId,
+                amountInr,
+                customerId: String(customer.id),
+                customerPhone: customer.phone,
+                customerEmail: customer.email,
+                customerName: customer.name,
+                returnUrl,
+                notifyUrl,
+                orderNote: "Paashupatastra community maintenance",
+              });
+            } catch (createErr) {
+              cashfreeOrder = await getCashfreeOrder(orderId);
+              if (!cashfreeOrder.payment_session_id) throw createErr;
+            }
+
+            due.paymentProvider = "cashfree";
+            due.paymentProviderOrderId = cashfreeOrder.order_id ?? orderId;
+            await communityDueRepo.save(due);
+
+            return reply.code(201).send({
+              id: due.id,
+              communityDueId: due.id,
+              orderId: cashfreeOrder.order_id ?? orderId,
+              paymentSessionId: cashfreeOrder.payment_session_id,
+              amountInPaise,
+              amountInr,
+              currency: "INR",
+              status: cashfreeOrder.order_status ?? "ACTIVE",
+              provider: "cashfree",
+              env: cfg.env,
+              returnUrl,
+            });
+          } catch (err) {
+            return reply.code(502).send({
+              error: {
+                code: "CASHFREE_ORDER_FAILED",
+                message: err instanceof Error ? err.message : "Failed to create Cashfree order",
+              },
+            });
+          }
+        }
+
         const booking = await bookingRepo.findOne({ where: { id: body.bookingId! } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
@@ -1413,6 +1526,69 @@ async function main() {
               provider: "cashfree",
               platformBalanceInPaise: credited.platformBalanceInPaise,
               amountInPaise: credited.amountInPaise,
+            };
+          } catch (err) {
+            return reply.code(502).send({
+              error: {
+                code: "CASHFREE_VERIFY_FAILED",
+                message: err instanceof Error ? err.message : "Payment verification failed",
+              },
+            });
+          }
+        }
+
+        if (body.communityDueId) {
+          const due = await communityDueRepo.findOne({ where: { id: body.communityDueId } });
+          if (!due) {
+            return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Community due not found" } });
+          }
+          if (due.residentUserId !== userId) {
+            return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your maintenance due" } });
+          }
+
+          const orderId =
+            body.orderId ?? due.paymentProviderOrderId ?? toCashfreeCommunityDueId(due.id);
+
+          try {
+            const order = await getCashfreeOrder(orderId);
+            if (!isCashfreePaid(order.order_status)) {
+              return reply.code(402).send({
+                error: {
+                  code: "PAYMENT_PENDING",
+                  message: `Cashfree order status is ${order.order_status ?? "UNKNOWN"}. Complete payment first.`,
+                },
+                orderStatus: order.order_status,
+                orderId,
+              });
+            }
+
+            due.paymentProviderOrderId = order.order_id ?? orderId;
+            due.paymentProvider = "cashfree";
+            await communityDueRepo.save(due);
+
+            try {
+              await confirmCommunityDuePayment(
+                due.id,
+                due.residentUserId,
+                order.order_id ?? orderId,
+                "cashfree_verify",
+              );
+            } catch (err) {
+              return reply.code(502).send({
+                error: {
+                  code: "COMMUNITY_CONFIRM_FAILED",
+                  message: err instanceof Error ? err.message : "Failed to confirm community payment",
+                },
+              });
+            }
+
+            return {
+              ok: true,
+              communityDueId: due.id,
+              orderId: order.order_id ?? orderId,
+              orderStatus: order.order_status,
+              provider: "cashfree",
+              amountInPaise: due.amountInPaise,
             };
           } catch (err) {
             return reply.code(502).send({
@@ -1921,7 +2097,37 @@ async function main() {
           ? await sevaBookingRepo.findOne({ where: { id: sevaBookingId } })
           : await sevaBookingRepo.findOne({ where: { paymentProviderOrderId: orderId } });
 
-        if (!sevaBooking) return { received: true, matched: false };
+        if (!sevaBooking) {
+          const communityDueId = communityDueIdFromCashfreeOrderId(orderId);
+          const communityDue = communityDueId
+            ? await communityDueRepo.findOne({ where: { id: communityDueId } })
+            : await communityDueRepo.findOne({ where: { paymentProviderOrderId: orderId } });
+
+          if (!communityDue) return { received: true, matched: false };
+
+          const communityPaid =
+            isCashfreePaid(orderStatus) ||
+            (paymentStatus ?? "").toUpperCase() === "SUCCESS" ||
+            payload?.type === "PAYMENT_SUCCESS_WEBHOOK";
+
+          if (communityPaid && communityDue.paymentStatus !== "paid") {
+            communityDue.paymentProviderOrderId = orderId;
+            communityDue.paymentProvider = "cashfree";
+            await communityDueRepo.save(communityDue);
+            try {
+              await confirmCommunityDuePayment(
+                communityDue.id,
+                communityDue.residentUserId,
+                orderId,
+                "cashfree_webhook",
+              );
+            } catch (err) {
+              app.log.error({ err }, "Failed to confirm community due after Cashfree webhook");
+            }
+          }
+
+          return { received: true, matched: true, communityDueId: communityDue.id };
+        }
 
         const sevaPaid =
           isCashfreePaid(orderStatus) ||

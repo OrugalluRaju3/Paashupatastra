@@ -45,8 +45,8 @@ export function OwnerHomePage() {
             </li>
             <li>
               If check-out is overdue by more than 1 hour, both the customer&apos;s account and your
-              account are set inactive (with reason). Login is blocked until a Parking Super Admin
-              reactivates you — you will get email and in-app notifications.
+              account are marked inactive (with reason). You can still log in. Contact Parking Super
+              Admin to clear the inactive flag — you will get email and in-app notifications.
             </li>
           </ol>
           <p style={{ marginTop: "1rem" }}>

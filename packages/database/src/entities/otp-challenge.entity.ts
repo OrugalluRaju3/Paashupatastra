@@ -16,7 +16,7 @@ export class OtpChallengeEntity {
   phone!: string;
 
   @Column({ type: "varchar", length: 20, default: "parking" })
-  module!: "parking" | "tanker" | "seva";
+  module!: "parking" | "tanker" | "seva" | "community";
 
   @Column({ type: "varchar", length: 6 })
   otp!: string;

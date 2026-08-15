@@ -10,19 +10,32 @@ export function PaymentReturnPage() {
   const bookingId = params.get("booking_id") ?? "";
   const tankerOrderId = params.get("tanker_order_id") ?? "";
   const sevaBookingId = params.get("seva_booking_id") ?? "";
+  const communityDueId = params.get("community_due_id") ?? "";
   const orderId = params.get("order_id") ?? "";
   const [status, setStatus] = useState<"working" | "ok" | "fail">("working");
   const [message, setMessage] = useState("Verifying Cashfree payment…");
 
   useEffect(() => {
-    if (!bookingId && !tankerOrderId && !sevaBookingId) {
+    if (!bookingId && !tankerOrderId && !sevaBookingId && !communityDueId) {
       setStatus("fail");
       setMessage("Missing booking id in return URL");
       return;
     }
     void (async () => {
       try {
-        if (sevaBookingId) {
+        if (communityDueId) {
+          await api.post("/payments/orders/verify", {
+            communityDueId,
+            orderId: orderId || undefined,
+          });
+          await api.post(`/community/dues/${communityDueId}/confirm-payment`, {
+            orderId: orderId || undefined,
+          });
+          setStatus("ok");
+          setMessage("Payment successful.");
+          toast.success("Payment successful");
+          window.setTimeout(() => navigate("/app/community"), 1500);
+        } else if (sevaBookingId) {
           await api.post("/payments/orders/verify", {
             sevaBookingId,
             orderId: orderId || undefined,
@@ -65,7 +78,7 @@ export function PaymentReturnPage() {
         toast.error(err instanceof Error ? err.message : "Payment verification failed");
       }
     })();
-  }, [bookingId, tankerOrderId, sevaBookingId, orderId, navigate, toast]);
+  }, [bookingId, tankerOrderId, sevaBookingId, communityDueId, orderId, navigate, toast]);
 
   return (
     <>
@@ -79,7 +92,11 @@ export function PaymentReturnPage() {
         <p className={status === "fail" ? "error" : "status"}>{message}</p>
         {status === "fail" ? (
           <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-            {sevaBookingId ? (
+            {communityDueId ? (
+              <Link className="btn btn-primary" to="/app/community">
+                Community home
+              </Link>
+            ) : sevaBookingId ? (
               <Link className="btn btn-primary" to="/app/seva/bookings">
                 My Seva bookings
               </Link>

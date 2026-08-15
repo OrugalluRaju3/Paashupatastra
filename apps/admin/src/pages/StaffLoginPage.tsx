@@ -24,17 +24,33 @@ const sevaOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
   },
 ];
 
+const communityOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
+  {
+    id: "community_super_admin",
+    label: "Community Super Admin",
+    hint: "Apartments, memberships, and society operations",
+  },
+];
+
 export function StaffLoginPage({ module }: { module: AuthModule }) {
   const toast = useToast();
   const { token, portal, module: activeModule, requestOtp, loginStaff } = useAuth();
   const navigate = useNavigate();
   const staffOptions =
-    module === "tanker" ? tankerOptions : module === "seva" ? sevaOptions : parkingOptions;
+    module === "tanker"
+      ? tankerOptions
+      : module === "seva"
+        ? sevaOptions
+        : module === "community"
+          ? communityOptions
+          : parkingOptions;
   const defaultIntent: StaffIntent =
     module === "tanker"
       ? "tanker_super_admin"
       : module === "seva"
         ? "seva_super_admin"
+        : module === "community"
+          ? "community_super_admin"
         : "parking_super_admin";
   const [intent, setIntent] = useState<StaffIntent>(defaultIntent);
   const [phone, setPhone] = useState("");
@@ -47,12 +63,16 @@ export function StaffLoginPage({ module }: { module: AuthModule }) {
   const title = useMemo(() => {
     if (module === "tanker") return "Tanker staff";
     if (module === "seva") return "Seva staff";
+    if (module === "community") return "Community staff";
     return "Parking staff";
   }, [module]);
 
   const subtitle = useMemo(() => {
     if (module === "seva") {
       return "Secure login for housekeeping & maintenance operations.";
+    }
+    if (module === "community") {
+      return "Secure login for apartment community operations.";
     }
     return `Secure login for ${title.toLowerCase()} operations.`;
   }, [module, title]);

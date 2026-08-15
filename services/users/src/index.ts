@@ -526,6 +526,16 @@ async function main() {
 
         const body = publicSignupSchema.parse(request.body);
 
+        if (body.intent === "resident" || body.intent === "society" || body.intent === "guard") {
+          return reply.code(403).send({
+            error: {
+              code: "SIGNUP_DISABLED",
+              message:
+                "Community accounts are created by Community Super Admin. Ask them to register this mobile.",
+            },
+          });
+        }
+
         if (body.intent === "supplier") {
           return reply.code(400).send({
             error: {

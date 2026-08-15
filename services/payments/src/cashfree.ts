@@ -46,6 +46,17 @@ export function sevaBookingIdFromCashfreeOrderId(orderId: string): number | null
   return n;
 }
 
+export function toCashfreeCommunityDueId(communityDueId: string | number) {
+  return `cm${communityDueId}`;
+}
+
+export function communityDueIdFromCashfreeOrderId(orderId: string): number | null {
+  if (!orderId.startsWith("cm")) return null;
+  const n = Number.parseInt(orderId.slice(2), 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
 type CashfreeOrder = {
   cf_order_id?: string | number;
   order_id: string;

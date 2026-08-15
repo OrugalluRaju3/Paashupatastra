@@ -6,7 +6,9 @@ function authHeaders(): Record<string, string> {
   const intent = localStorage.getItem("paash_intent");
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (module === "parking" || module === "tanker" || module === "seva") headers["x-auth-module"] = module;
+  if (module === "parking" || module === "tanker" || module === "seva" || module === "community") {
+    headers["x-auth-module"] = module;
+  }
   if (intent) headers["x-auth-intent"] = intent;
   return headers;
 }

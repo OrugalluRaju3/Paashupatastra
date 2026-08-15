@@ -13,8 +13,8 @@ export function WelcomePage() {
           </div>
         </div>
         <p className="auth-sub">
-          Book parking, order a water tanker, or hire housekeeping &amp; maintenance — pick a
-          service below to sign in as a customer, owner, supplier, provider, or staff.
+          Book parking, order a water tanker, hire housekeeping, or manage your apartment
+          community — pick a service below to sign in as a customer, owner, resident, or staff.
         </p>
 
         <div className="welcome-actions">
@@ -27,6 +27,9 @@ export function WelcomePage() {
           <Link className="btn btn-primary" to="/login/seva">
             Seva (housekeeping &amp; maintenance)
           </Link>
+          <Link className="btn btn-primary" to="/login/community">
+            Community
+          </Link>
           <Link className="btn btn-ghost" to="/staff/login/parking">
             Parking staff
           </Link>
@@ -35,6 +38,9 @@ export function WelcomePage() {
           </Link>
           <Link className="btn btn-ghost" to="/staff/login/seva">
             Seva staff
+          </Link>
+          <Link className="btn btn-ghost" to="/staff/login/community">
+            Community staff
           </Link>
         </div>
       </div>

@@ -5,6 +5,7 @@ export const UserRole = {
   PARKING_SUPER_ADMIN: "parking_super_admin",
   TANKER_SUPER_ADMIN: "tanker_super_admin",
   SEVA_SUPER_ADMIN: "seva_super_admin",
+  COMMUNITY_SUPER_ADMIN: "community_super_admin",
   VERIFICATION_MANAGER: "verification_manager",
   FIELD_EXECUTIVE: "field_executive",
   PARKING_OWNER: "parking_owner",
@@ -15,6 +16,7 @@ export const UserRole = {
   CUSTOMER: "customer",
   APARTMENT_ADMIN: "apartment_admin",
   RESIDENT: "resident",
+  COMMUNITY_GUARD: "community_guard",
   VISITOR: "visitor",
 } as const;
 
@@ -23,6 +25,7 @@ export const userRoleSchema = z.enum([
   UserRole.PARKING_SUPER_ADMIN,
   UserRole.TANKER_SUPER_ADMIN,
   UserRole.SEVA_SUPER_ADMIN,
+  UserRole.COMMUNITY_SUPER_ADMIN,
   UserRole.VERIFICATION_MANAGER,
   UserRole.FIELD_EXECUTIVE,
   UserRole.PARKING_OWNER,
@@ -33,6 +36,7 @@ export const userRoleSchema = z.enum([
   UserRole.CUSTOMER,
   UserRole.APARTMENT_ADMIN,
   UserRole.RESIDENT,
+  UserRole.COMMUNITY_GUARD,
   UserRole.VISITOR,
 ]);
 
@@ -300,3 +304,107 @@ export const sevaBookingStatusSchema = z.enum([
 ]);
 
 export type SevaBookingStatus = z.infer<typeof sevaBookingStatusSchema>;
+
+export const CommunityMembershipRole = {
+  RESIDENT: "resident",
+  APARTMENT_ADMIN: "apartment_admin",
+  GUARD: "guard",
+} as const;
+
+export const communityMembershipRoleSchema = z.enum([
+  CommunityMembershipRole.RESIDENT,
+  CommunityMembershipRole.APARTMENT_ADMIN,
+  CommunityMembershipRole.GUARD,
+]);
+
+export type CommunityMembershipRole = z.infer<typeof communityMembershipRoleSchema>;
+
+export const CommunityMembershipStatus = {
+  PENDING: "pending",
+  APPROVED: "approved",
+  REJECTED: "rejected",
+  SUSPENDED: "suspended",
+} as const;
+
+export const communityMembershipStatusSchema = z.enum([
+  CommunityMembershipStatus.PENDING,
+  CommunityMembershipStatus.APPROVED,
+  CommunityMembershipStatus.REJECTED,
+  CommunityMembershipStatus.SUSPENDED,
+]);
+
+export type CommunityMembershipStatus = z.infer<typeof communityMembershipStatusSchema>;
+
+export const CommunityComplaintCategory = {
+  PLUMBING: "plumbing",
+  ELECTRICAL: "electrical",
+  LIFT: "lift",
+  SECURITY: "security",
+  HOUSEKEEPING: "housekeeping",
+  WATER: "water",
+  OTHER: "other",
+} as const;
+
+export const communityComplaintCategorySchema = z.enum([
+  CommunityComplaintCategory.PLUMBING,
+  CommunityComplaintCategory.ELECTRICAL,
+  CommunityComplaintCategory.LIFT,
+  CommunityComplaintCategory.SECURITY,
+  CommunityComplaintCategory.HOUSEKEEPING,
+  CommunityComplaintCategory.WATER,
+  CommunityComplaintCategory.OTHER,
+]);
+
+export type CommunityComplaintCategory = z.infer<typeof communityComplaintCategorySchema>;
+
+export const CommunityComplaintStatus = {
+  OPEN: "open",
+  ACKNOWLEDGED: "acknowledged",
+  IN_PROGRESS: "in_progress",
+  RESOLVED: "resolved",
+  CLOSED: "closed",
+} as const;
+
+export const communityComplaintStatusSchema = z.enum([
+  CommunityComplaintStatus.OPEN,
+  CommunityComplaintStatus.ACKNOWLEDGED,
+  CommunityComplaintStatus.IN_PROGRESS,
+  CommunityComplaintStatus.RESOLVED,
+  CommunityComplaintStatus.CLOSED,
+]);
+
+export type CommunityComplaintStatus = z.infer<typeof communityComplaintStatusSchema>;
+
+export const CommunityVisitorStatus = {
+  SCHEDULED: "scheduled",
+  CHECKED_IN: "checked_in",
+  CHECKED_OUT: "checked_out",
+  EXPIRED: "expired",
+  CANCELLED: "cancelled",
+} as const;
+
+export const communityVisitorStatusSchema = z.enum([
+  CommunityVisitorStatus.SCHEDULED,
+  CommunityVisitorStatus.CHECKED_IN,
+  CommunityVisitorStatus.CHECKED_OUT,
+  CommunityVisitorStatus.EXPIRED,
+  CommunityVisitorStatus.CANCELLED,
+]);
+
+export type CommunityVisitorStatus = z.infer<typeof communityVisitorStatusSchema>;
+
+export const CommunityDueStatus = {
+  DUE: "due",
+  PAID: "paid",
+  OVERDUE: "overdue",
+  CANCELLED: "cancelled",
+} as const;
+
+export const communityDueStatusSchema = z.enum([
+  CommunityDueStatus.DUE,
+  CommunityDueStatus.PAID,
+  CommunityDueStatus.OVERDUE,
+  CommunityDueStatus.CANCELLED,
+]);
+
+export type CommunityDueStatus = z.infer<typeof communityDueStatusSchema>;

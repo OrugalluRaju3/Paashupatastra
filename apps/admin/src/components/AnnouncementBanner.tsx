@@ -15,7 +15,7 @@ export function AnnouncementBanner() {
 
   const load = useCallback(async () => {
     if (!token) return;
-    const contentModule = module === "tanker" ? "tanker" : module === "seva" ? "seva" : "parking";
+    const contentModule = module === "tanker" || module === "seva" || module === "community" ? module : "parking";
     try {
       const res = await api.get<{ items: Announcement[] }>(
         `/content/announcements${qs({ module: contentModule })}`,

@@ -1,6 +1,8 @@
 import "reflect-metadata";
 import { DataSource, type DataSourceOptions } from "typeorm";
 import { ApartmentEntity } from "./entities/apartment.entity";
+import { ApartmentBlockEntity } from "./entities/apartment-block.entity";
+import { ApartmentFlatEntity } from "./entities/apartment-flat.entity";
 import { BankAccountEntity } from "./entities/bank-account.entity";
 import { CommissionConfigEntity } from "./entities/commission-config.entity";
 import { NotificationLogEntity } from "./entities/notification-log.entity";
@@ -39,6 +41,15 @@ import { TermsAcceptanceEntity } from "./entities/terms-acceptance.entity";
 import { FaqEntity } from "./entities/faq.entity";
 import { SupportContactSettingsEntity } from "./entities/support-contact-settings.entity";
 import { AnnouncementEntity } from "./entities/announcement.entity";
+import { CommunityAccountEntity } from "./entities/community-account.entity";
+import { CommunityComplaintEntity } from "./entities/community-complaint.entity";
+import { CommunityDueEntity } from "./entities/community-due.entity";
+import { CommunityExpenseEntity } from "./entities/community-expense.entity";
+import { CommunityInvoiceEntity } from "./entities/community-invoice.entity";
+import { CommunityLedgerEntity } from "./entities/community-ledger.entity";
+import { CommunityMembershipEntity } from "./entities/community-membership.entity";
+import { CommunityNoticeEntity } from "./entities/community-notice.entity";
+import { CommunityVisitorPassEntity } from "./entities/community-visitor-pass.entity";
 
 export const allEntities = [
   UserEntity,
@@ -47,6 +58,8 @@ export const allEntities = [
   UserDocumentEntity,
   BankAccountEntity,
   ApartmentEntity,
+  ApartmentBlockEntity,
+  ApartmentFlatEntity,
   ParkingSlotEntity,
   ParkingListingEntity,
   ParkingBookingEntity,
@@ -80,6 +93,15 @@ export const allEntities = [
   FaqEntity,
   SupportContactSettingsEntity,
   AnnouncementEntity,
+  CommunityAccountEntity,
+  CommunityComplaintEntity,
+  CommunityDueEntity,
+  CommunityExpenseEntity,
+  CommunityInvoiceEntity,
+  CommunityLedgerEntity,
+  CommunityMembershipEntity,
+  CommunityNoticeEntity,
+  CommunityVisitorPassEntity,
 ];
 
 export function buildDataSourceOptions(overrides: Partial<DataSourceOptions> = {}): DataSourceOptions {

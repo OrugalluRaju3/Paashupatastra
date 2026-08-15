@@ -27,6 +27,10 @@ import { SevaCustomerPage } from "./pages/SevaCustomerPage";
 import { SevaProviderPage } from "./pages/SevaProviderPage";
 import { SevaWorkerPage } from "./pages/SevaWorkerPage";
 import { SevaStaffPage } from "./pages/SevaStaffPage";
+import { CommunityResidentPage } from "./pages/CommunityResidentPage";
+import { CommunitySocietyPage } from "./pages/CommunitySocietyPage";
+import { CommunityGuardPage } from "./pages/CommunityGuardPage";
+import { CommunityStaffPage } from "./pages/CommunityStaffPage";
 import { ContentCmsPage } from "./pages/ContentCmsPage";
 import { HelpCenterPage } from "./pages/HelpCenterPage";
 import { ParkingUsersPage, StaffUsersPage, TankerUsersPage } from "./pages/UsersPage";
@@ -45,10 +49,12 @@ export default function App() {
             <Route path="/login/parking" element={<PublicLoginPage module="parking" />} />
             <Route path="/login/tanker" element={<PublicLoginPage module="tanker" />} />
             <Route path="/login/seva" element={<PublicLoginPage module="seva" />} />
+            <Route path="/login/community" element={<PublicLoginPage module="community" />} />
             <Route path="/staff/login" element={<Navigate to="/" replace />} />
             <Route path="/staff/login/parking" element={<StaffLoginPage module="parking" />} />
             <Route path="/staff/login/tanker" element={<StaffLoginPage module="tanker" />} />
             <Route path="/staff/login/seva" element={<StaffLoginPage module="seva" />} />
+            <Route path="/staff/login/community" element={<StaffLoginPage module="community" />} />
 
             <Route element={<RequireAuth portal="staff" />}>
               <Route path="/staff" element={<StaffLayout />}>
@@ -70,6 +76,9 @@ export default function App() {
                 </Route>
                 <Route element={<RequireModule module="seva" />}>
                   <Route path="seva" element={<SevaStaffPage />} />
+                </Route>
+                <Route element={<RequireModule module="community" />}>
+                  <Route path="community" element={<CommunityStaffPage />} />
                 </Route>
                 {/* Shared by parking + tanker staff — role check is inside the page */}
                 <Route path="content" element={<ContentCmsPage />} />
@@ -129,6 +138,24 @@ export default function App() {
                   <Route path="provider/invoices" element={<SevaProviderPage />} />
                   <Route path="provider/wallet" element={<WalletPage />} />
                   <Route path="worker" element={<SevaWorkerPage />} />
+                </Route>
+                <Route element={<RequireModule module="community" />}>
+                  <Route path="community" element={<CommunityResidentPage section="home" />} />
+                  <Route path="community/notices" element={<CommunityResidentPage section="notices" />} />
+                  <Route path="community/expenses" element={<CommunityResidentPage section="expenses" />} />
+                  <Route path="community/complaints" element={<CommunityResidentPage section="complaints" />} />
+                  <Route path="community/visitors" element={<CommunityResidentPage section="visitors" />} />
+                  <Route path="community/guards" element={<CommunityResidentPage section="guards" />} />
+                  <Route path="community/payment/return" element={<PaymentReturnPage />} />
+                  <Route path="society" element={<CommunitySocietyPage section="home" />} />
+                  <Route path="society/units" element={<CommunitySocietyPage section="units" />} />
+                  <Route path="society/members" element={<CommunitySocietyPage section="members" />} />
+                  <Route path="society/notices" element={<CommunitySocietyPage section="notices" />} />
+                  <Route path="society/complaints" element={<CommunitySocietyPage section="complaints" />} />
+                  <Route path="society/visitors" element={<CommunitySocietyPage section="visitors" />} />
+                  <Route path="society/expenses" element={<CommunitySocietyPage section="expenses" />} />
+                  <Route path="gate" element={<CommunityGuardPage section="gate" />} />
+                  <Route path="gate/residents" element={<CommunityGuardPage section="residents" />} />
                 </Route>
               </Route>
             </Route>

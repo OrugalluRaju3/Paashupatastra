@@ -6,6 +6,7 @@ async function main() {
     { prefix: "/v1/auth", upstream: envString("AUTH_URL", "http://localhost:3001") },
     { prefix: "/v1/users", upstream: envString("USERS_URL", "http://localhost:3002") },
     { prefix: "/v1/apartments", upstream: envString("COMMUNITIES_URL", "http://localhost:3003") },
+    { prefix: "/v1/community", upstream: envString("COMMUNITIES_URL", "http://localhost:3003") },
     { prefix: "/v1/parking", upstream: envString("PARKING_URL", "http://localhost:3004") },
     { prefix: "/v1/payments", upstream: envString("PAYMENTS_URL", "http://localhost:3005") },
     {

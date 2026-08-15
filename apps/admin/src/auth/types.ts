@@ -1,4 +1,4 @@
-export type AuthModule = "parking" | "tanker" | "seva";
+export type AuthModule = "parking" | "tanker" | "seva" | "community";
 
 export type AuthUser = {
   id: string;
@@ -11,13 +11,23 @@ export type AuthUser = {
 
 export type PortalKind = "public" | "staff";
 
-export type PublicIntent = "customer" | "owner" | "supplier" | "driver" | "provider" | "worker";
+export type PublicIntent =
+  | "customer"
+  | "owner"
+  | "supplier"
+  | "driver"
+  | "provider"
+  | "worker"
+  | "resident"
+  | "society"
+  | "guard";
 
 export type StaffIntent =
   | "parking_super_admin"
   | "super_admin"
   | "tanker_super_admin"
   | "seva_super_admin"
+  | "community_super_admin"
   | "verification_manager"
   | "field_executive";
 
@@ -32,10 +42,13 @@ export const TANKER_STAFF_ROLES = ["tanker_super_admin"] as const;
 
 export const SEVA_STAFF_ROLES = ["seva_super_admin"] as const;
 
+export const COMMUNITY_STAFF_ROLES = ["community_super_admin"] as const;
+
 export const STAFF_ROLES = [
   ...PARKING_STAFF_ROLES,
   ...TANKER_STAFF_ROLES,
   ...SEVA_STAFF_ROLES,
+  ...COMMUNITY_STAFF_ROLES,
 ] as const;
 
 export const PUBLIC_ROLES = [
@@ -47,6 +60,8 @@ export const PUBLIC_ROLES = [
   "tanker_driver",
   "seva_provider",
   "seva_worker",
+  "apartment_admin",
+  "community_guard",
 ] as const;
 
 type RoleHolder = { roles: string[] } | null | undefined;
@@ -80,6 +95,17 @@ export function isSevaStaff(user: RoleHolder): boolean {
   return user?.roles.some((r) => SEVA_STAFF_ROLES.includes(r as (typeof SEVA_STAFF_ROLES)[number])) ?? false;
 }
 
+export function isCommunitySuperAdmin(user: RoleHolder): boolean {
+  return hasAnyRole(user, ["community_super_admin"]);
+}
+
+export function isCommunityStaff(user: RoleHolder): boolean {
+  return (
+    user?.roles.some((r) => COMMUNITY_STAFF_ROLES.includes(r as (typeof COMMUNITY_STAFF_ROLES)[number])) ??
+    false
+  );
+}
+
 export function isOwnerUser(user: AuthUser | null | undefined): boolean {
   if (!user) return false;
   return user.roles.includes("parking_owner");
@@ -111,13 +137,23 @@ export function hasAnyRole(user: RoleHolder, roles: string[]): boolean {
 }
 
 export function moduleForIntent(intent: string, forcedModule?: AuthModule | null): AuthModule {
-  if (forcedModule === "parking" || forcedModule === "tanker" || forcedModule === "seva") {
+  if (
+    forcedModule === "parking" ||
+    forcedModule === "tanker" ||
+    forcedModule === "seva" ||
+    forcedModule === "community"
+  ) {
     return forcedModule;
   }
   if (intent === "supplier" || intent === "driver") return "tanker";
   if (intent === "provider" || intent === "worker") return "seva";
+  if (intent === "resident" || intent === "society" || intent === "guard") return "community";
   if (intent === "owner") return "parking";
   return "parking";
+}
+
+export function authContentModule(module: AuthModule | null | undefined): AuthModule {
+  return module === "tanker" || module === "seva" || module === "community" ? module : "parking";
 }
 
 export function publicHomePath(intent: string | null | undefined, module?: AuthModule | null): string {
@@ -131,6 +167,11 @@ export function publicHomePath(intent: string | null | undefined, module?: AuthM
     if (intent === "worker") return "/app/worker";
     return "/app/seva";
   }
+  if (module === "community") {
+    if (intent === "society") return "/app/society";
+    if (intent === "guard") return "/app/gate";
+    return "/app/community";
+  }
   if (intent === "owner") return "/app/owner";
   return "/app/customer";
 }
@@ -138,5 +179,6 @@ export function publicHomePath(intent: string | null | undefined, module?: AuthM
 export function staffHomePath(module: AuthModule): string {
   if (module === "tanker") return "/staff/tanker";
   if (module === "seva") return "/staff/seva";
+  if (module === "community") return "/staff/community";
   return "/staff";
 }

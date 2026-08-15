@@ -8,14 +8,17 @@ type TermsDoc = {
 };
 
 type Props = {
-  module: "parking" | "tanker" | "seva";
+  module: "parking" | "tanker" | "seva" | "community";
   audience:
     | "customer"
     | "parking_owner"
     | "tanker_supplier"
     | "tanker_driver"
     | "seva_provider"
-    | "seva_worker";
+    | "seva_worker"
+    | "resident"
+    | "apartment_admin"
+    | "community_guard";
   checked: boolean;
   onCheckedChange: (v: boolean) => void;
   onTermsLoaded?: (terms: TermsDoc | null) => void;

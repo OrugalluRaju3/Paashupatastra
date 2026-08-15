@@ -134,7 +134,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
   const { token, portal, requestOtp, loginPublic, signupPublic } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>("login");
-  const [intent, setIntent] = useState<PublicIntent>("customer");
+  const [intent, setIntent] = useState<PublicIntent>(module === "community" ? "resident" : "customer");
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
@@ -159,6 +159,17 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     if (module === "seva" && (intent === "owner" || intent === "supplier" || intent === "driver")) {
       setIntent("customer");
     }
+    if (
+      module === "community" &&
+      intent !== "resident" &&
+      intent !== "society" &&
+      intent !== "guard"
+    ) {
+      setIntent("resident");
+    }
+    if (module === "community") {
+      setMode("login");
+    }
     setTermsAccepted(false);
     setTermsId(null);
   }, [module, intent]);
@@ -169,12 +180,18 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     | "tanker_supplier"
     | "tanker_driver"
     | "seva_provider"
-    | "seva_worker" {
+    | "seva_worker"
+    | "resident"
+    | "apartment_admin"
+    | "community_guard" {
     if (intent === "owner") return "parking_owner";
     if (intent === "supplier") return "tanker_supplier";
     if (intent === "driver") return "tanker_driver";
     if (intent === "provider") return "seva_provider";
     if (intent === "worker") return "seva_worker";
+    if (intent === "resident") return "resident";
+    if (intent === "society") return "apartment_admin";
+    if (intent === "guard") return "community_guard";
     return "customer";
   }
 
@@ -195,6 +212,14 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
   }
 
   function switchMode(next: Mode) {
+    if (module === "community") {
+      setMode("login");
+      setOtpSent(false);
+      setOtp("");
+      setOtpHint("");
+      setDebugOtp(undefined);
+      return;
+    }
     setMode(next);
     if (next === "signup" && intent === "driver") {
       setIntent("supplier");
@@ -240,6 +265,9 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     if (value === "driver") return "Tanker driver";
     if (value === "provider") return "Seva provider";
     if (value === "worker") return "Seva worker";
+    if (value === "resident") return "Resident";
+    if (value === "society") return "Apartment admin";
+    if (value === "guard") return "Community guard";
     return "Customer";
   }
 
@@ -527,6 +555,8 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
       ? "Water tanker"
       : module === "seva"
         ? "Seva — housekeeping & maintenance"
+        : module === "community"
+          ? "Community management"
         : "Parking";
 
   return (
@@ -550,16 +580,27 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                 ? "Register as a water tanker supplier with fleet and drivers."
                 : intent === "provider"
                   ? "Register as a housekeeping & maintenance provider."
+                  : intent === "society"
+                    ? "Register as an apartment / society admin."
+                    : intent === "guard"
+                      ? "Register as a community gate guard."
+                      : intent === "resident"
+                        ? "Sign up as a resident to join your apartment."
                   : module === "tanker"
                     ? "Sign up as a water tanker customer."
                     : module === "seva"
                       ? "Sign up to book housekeeping and maintenance services."
+                      : module === "community"
+                        ? "Sign up for community management."
                       : "Sign up as a parking customer."
             : module === "seva"
               ? "Login for housekeeping & maintenance — customer, provider, or worker."
+              : module === "community"
+                ? "Community Super Admin registers residents, apartment admins, and guards. Log in with the invited mobile number."
               : "Login with your registered mobile number."}
         </p>
 
+        {module === "community" ? null : (
         <div className="intent-tabs">
           <button
             type="button"
@@ -576,8 +617,35 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
             Sign up
           </button>
         </div>
+        )}
 
         <div className="intent-tabs">
+          {module === "community" ? (
+            <>
+              <button
+                type="button"
+                className={intent === "resident" ? "intent active" : "intent"}
+                onClick={() => setIntent("resident")}
+              >
+                Resident
+              </button>
+              <button
+                type="button"
+                className={intent === "society" ? "intent active" : "intent"}
+                onClick={() => setIntent("society")}
+              >
+                Apartment admin
+              </button>
+              <button
+                type="button"
+                className={intent === "guard" ? "intent active" : "intent"}
+                onClick={() => setIntent("guard")}
+              >
+                Guard
+              </button>
+            </>
+          ) : (
+            <>
           <button
             type="button"
             className={intent === "customer" ? "intent active" : "intent"}
@@ -630,6 +698,8 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
               Worker
             </button>
           ) : null}
+            </>
+          )}
         </div>
 
         {!otpSent ? (
@@ -1568,8 +1638,17 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
 
         <p className="auth-switch">
           <Link to="/">← Back to product choice</Link>
-          {" · "}
-          Staff? Use Parking, Tanker, or Seva staff on the home page.
+          {module === "community" ? (
+            <>
+              {" · "}
+              Staff? Use Community staff login on the home page.
+            </>
+          ) : (
+            <>
+              {" · "}
+              Staff? Use Parking, Tanker, or Seva staff on the home page.
+            </>
+          )}
         </p>
       </div>
     </div>

@@ -3532,7 +3532,7 @@ async function main() {
                   ? "You did not complete check-out within 1 hour after the planned end time."
                   : "A customer on your parking slot did not check out within 1 hour after the planned end time.",
                 "",
-                "You cannot log in until a Parking Super Admin reactivates your account.",
+                "Your parking account is marked inactive. You can still log in. Contact Parking Super Admin to clear this flag.",
                 "",
                 "— Paashupatastra",
               ].join("\n"),

@@ -35,6 +35,11 @@ function audienceForIntent(intent: string | null | undefined) {
   if (intent === "owner") return "parking_owner";
   if (intent === "supplier") return "tanker_supplier";
   if (intent === "driver") return "tanker_driver";
+  if (intent === "provider") return "seva_provider";
+  if (intent === "worker") return "seva_worker";
+  if (intent === "resident") return "resident";
+  if (intent === "society") return "apartment_admin";
+  if (intent === "guard") return "community_guard";
   return "customer";
 }
 
@@ -42,7 +47,7 @@ export function HelpCenterPage({ section = "faq" }: { section?: Section }) {
   const toast = useToast();
   const { module, intent } = useAuth();
   const contentModule =
-    module === "tanker" ? "tanker" : module === "seva" ? "seva" : "parking";
+    module === "tanker" || module === "seva" || module === "community" ? module : "parking";
   const [faqs, setFaqs] = useState<Faq[]>([]);
   const [privacy, setPrivacy] = useState<Doc | null>(null);
   const [terms, setTerms] = useState<Doc | null>(null);

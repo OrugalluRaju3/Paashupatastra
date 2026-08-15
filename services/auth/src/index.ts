@@ -114,15 +114,24 @@ type LoginGate =
  * Reject login when phone exists but selected portal/intent does not match roles.
  * Signup skips this (roles are assigned after verify).
  */
+function isOverdueCheckoutDeactivation(reason?: string | null, deactivatedBy?: string | null) {
+  if (deactivatedBy === "system:overdue_checkout") return true;
+  return Boolean(reason?.includes("check-out overdue"));
+}
+
 function gateLoginAccess(input: {
-  module: "parking" | "tanker" | "seva";
+  module: "parking" | "tanker" | "seva" | "community";
   portal?: string;
   intent?: string;
   roles: string[];
   isActive: boolean;
   deactivationReason?: string | null;
+  deactivatedBy?: string | null;
 }): LoginGate {
-  if (!input.isActive) {
+  if (
+    !input.isActive &&
+    !isOverdueCheckoutDeactivation(input.deactivationReason, input.deactivatedBy)
+  ) {
     const reason = input.deactivationReason?.trim();
     return {
       ok: false,
@@ -197,6 +206,18 @@ function gateLoginAccess(input: {
           statusCode: 403,
           code: "ROLE_MISMATCH",
           message: "This mobile does not have Seva Super Admin access.",
+        };
+      }
+      return { ok: true };
+    }
+
+    if (module === "community") {
+      if (!hasRole(roles, UserRole.COMMUNITY_SUPER_ADMIN)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message: "This mobile is not registered as Community staff.",
         };
       }
       return { ok: true };
@@ -286,6 +307,59 @@ function gateLoginAccess(input: {
       statusCode: 400,
       code: "INVALID_INTENT",
       message: "Use Parking or Tanker login for owner/supplier/driver roles.",
+    };
+  }
+
+  if (module === "community") {
+    if (hasRole(roles, UserRole.COMMUNITY_SUPER_ADMIN)) {
+      return {
+        ok: false,
+        statusCode: 403,
+        code: "ROLE_MISMATCH",
+        message: "This is a Community staff number. Use Community staff login, not Apartment admin / Resident.",
+      };
+    }
+    if (intent === "society") {
+      if (!hasRole(roles, UserRole.APARTMENT_ADMIN)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message:
+            "This mobile is not registered as an apartment admin. Ask Community Super Admin to register this account.",
+        };
+      }
+      return { ok: true };
+    }
+    if (intent === "resident") {
+      if (!hasRole(roles, UserRole.RESIDENT)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message:
+            "This mobile is not registered as a resident. Ask Community Super Admin to register this account.",
+        };
+      }
+      return { ok: true };
+    }
+    if (intent === "guard") {
+      if (!hasRole(roles, UserRole.COMMUNITY_GUARD)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message:
+            "This mobile is not registered as a community guard. Ask Community Super Admin to register this account.",
+        };
+      }
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "INVALID_INTENT",
+      message: "Use Community login for resident, apartment admin, or guard.",
     };
   }
 
@@ -516,6 +590,7 @@ async function main() {
             roles: user.roles ?? [],
             isActive: user.isActive,
             deactivationReason: user.deactivationReason,
+            deactivatedBy: user.deactivatedBy,
           });
           if (!gate.ok) {
             return reply.code(gate.statusCode).send({
@@ -589,6 +664,110 @@ async function main() {
         });
       }
 
+      if (module === "community") {
+        if (purpose === "signup") {
+          return reply.code(403).send({
+            error: {
+              code: "SIGNUP_DISABLED",
+              message:
+                "Community accounts are created by Community Super Admin. Ask them to register this mobile.",
+            },
+          });
+        }
+
+        const user = await userRepo.findOne({ where: { phone: body.phone } });
+
+        if (isLogin) {
+          if (!user) {
+            return reply.code(404).send({
+              error: {
+                code: "USER_NOT_FOUND",
+                message:
+                  "This mobile is not registered for Community. Ask Community Super Admin to register this account.",
+              },
+            });
+          }
+          const gate = gateLoginAccess({
+            module: "community",
+            portal: body.portal,
+            intent: body.intent,
+            roles: user.roles ?? [],
+            isActive: user.isActive,
+            deactivationReason: user.deactivationReason,
+            deactivatedBy: user.deactivatedBy,
+          });
+          if (!gate.ok) {
+            return reply.code(gate.statusCode).send({
+              error: { code: gate.code, message: gate.message },
+            });
+          }
+        }
+
+        if (body.email) {
+          if (user?.name && user.email) {
+            return reply.code(409).send({
+              error: {
+                code: "ALREADY_REGISTERED",
+                message: "This mobile is already registered. Please login instead.",
+              },
+            });
+          }
+          const emailOwner = await userRepo
+            .createQueryBuilder("u")
+            .where("LOWER(u.email) = :email", { email: body.email.trim().toLowerCase() })
+            .getOne();
+          if (emailOwner && emailOwner.phone !== body.phone) {
+            return reply.code(409).send({
+              error: {
+                code: "DUPLICATE_EMAIL",
+                message: "This email is already registered with another account.",
+              },
+            });
+          }
+        }
+
+        const otp = generateOtp();
+        await otpRepo.save(
+          otpRepo.create({
+            phone: body.phone,
+            module: "community",
+            otp,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+            consumedAt: null,
+          }),
+        );
+        if (isLogin) {
+          rememberLoginContext({
+            phone: body.phone,
+            module: "community",
+            otp,
+            portal: body.portal,
+            intent: body.intent,
+          });
+        }
+
+        const deliveredVia = await deliverOtp({
+          phone: body.phone,
+          otp,
+          user,
+          fallbackEmail: body.email,
+          log: app.log,
+        });
+
+        app.log.info({ phone: body.phone, module, purpose, deliveredVia }, "OTP requested");
+
+        const exposeDebug = process.env.EXPOSE_DEBUG_OTP === "true";
+        const emailed = Boolean(user?.email || body.email);
+        return reply.code(200).send({
+          ok: true,
+          message: emailed
+            ? "OTP sent to your email"
+            : "OTP generated — check SMS / contact admin if email is missing",
+          deliveredVia,
+          debugOtp: exposeDebug ? otp : undefined,
+        });
+      }
+
       const user = await userRepo.findOne({ where: { phone: body.phone } });
 
       if (isLogin) {
@@ -608,6 +787,7 @@ async function main() {
           roles: user.roles ?? [],
           isActive: user.isActive,
           deactivationReason: user.deactivationReason,
+          deactivatedBy: user.deactivatedBy,
         });
         if (!gate.ok) {
           return reply.code(gate.statusCode).send({
@@ -778,6 +958,7 @@ async function main() {
               roles: user.roles ?? [],
               isActive: user.isActive,
               deactivationReason: user.deactivationReason,
+            deactivatedBy: user.deactivatedBy,
             });
             if (!gate.ok) {
               return reply.code(gate.statusCode).send({
@@ -810,6 +991,57 @@ async function main() {
           };
         }
 
+        if (module === "community") {
+          const user = await userRepo.findOne({ where: { phone: body.phone } });
+
+          if (!isLogin) {
+            return reply.code(403).send({
+              error: {
+                code: "SIGNUP_DISABLED",
+                message:
+                  "Community accounts are created by Community Super Admin. Ask them to register this mobile.",
+              },
+            });
+          }
+
+          if (!user) {
+            return reply.code(404).send({
+              error: {
+                code: "USER_NOT_FOUND",
+                message:
+                  "This mobile is not registered for Community. Ask Community Super Admin to register this account.",
+              },
+            });
+          }
+          const gate = gateLoginAccess({
+            module: "community",
+            portal,
+            intent,
+            roles: user.roles ?? [],
+            isActive: user.isActive,
+            deactivationReason: user.deactivationReason,
+            deactivatedBy: user.deactivatedBy,
+          });
+          if (!gate.ok) {
+            return reply.code(gate.statusCode).send({
+              error: { code: gate.code, message: gate.message },
+            });
+          }
+
+          latest.consumedAt = new Date();
+          await otpRepo.save(latest);
+          forgetLoginContext(body.phone, module, body.otp);
+
+          const accessToken = Buffer.from(
+            JSON.stringify({ sub: String(user.id), roles: user.roles, module: "community" }),
+          ).toString("base64url");
+
+          return {
+            accessToken,
+            user: serializeUser(user),
+          };
+        }
+
         let user = await userRepo.findOne({ where: { phone: body.phone } });
 
         if (isLogin) {
@@ -828,6 +1060,7 @@ async function main() {
             roles: user.roles ?? [],
             isActive: user.isActive,
             deactivationReason: user.deactivationReason,
+            deactivatedBy: user.deactivatedBy,
           });
           if (!gate.ok) {
             return reply.code(gate.statusCode).send({
@@ -902,9 +1135,14 @@ async function main() {
           return { accessToken, user: serializeUser(user) };
         }
 
-        const tokenModule = payload.module === "seva" ? "seva" : "parking";
+        const tokenModule =
+          payload.module === "seva" || payload.module === "community" ? payload.module : "parking";
         const user = await userRepo.findOne({ where: { id: parseEntityId(payload.sub) } });
-        if (!user || !user.isActive) {
+        if (
+          !user ||
+          (!user.isActive &&
+            !isOverdueCheckoutDeactivation(user.deactivationReason, user.deactivatedBy))
+        ) {
           return reply.code(401).send({
             error: { code: "UNAUTHORIZED", message: "User not found" },
           });

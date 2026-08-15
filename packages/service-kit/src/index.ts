@@ -92,12 +92,18 @@ export function getUserIdFromHeaders(headers: Record<string, unknown>): string |
   }
 }
 
-/** Read auth module (`parking` | `tanker` | `seva`) from JWT or x-auth-module header. */
+type AuthModuleHeader = "parking" | "tanker" | "seva" | "community";
+
+function isAuthModuleHeader(value: unknown): value is AuthModuleHeader {
+  return value === "parking" || value === "tanker" || value === "seva" || value === "community";
+}
+
+/** Read auth module (`parking` | `tanker` | `seva` | `community`) from JWT or x-auth-module header. */
 export function getAuthModuleFromHeaders(
   headers: Record<string, unknown>,
-): "parking" | "tanker" | "seva" | null {
+): AuthModuleHeader | null {
   const explicit = headers["x-auth-module"];
-  if (explicit === "parking" || explicit === "tanker" || explicit === "seva") return explicit;
+  if (isAuthModuleHeader(explicit)) return explicit;
 
   const auth = headers.authorization;
   if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return null;
@@ -105,9 +111,7 @@ export function getAuthModuleFromHeaders(
     const token = auth.slice("Bearer ".length);
     const json = Buffer.from(token, "base64url").toString("utf8");
     const payload = JSON.parse(json) as { module?: string };
-    if (payload.module === "parking" || payload.module === "tanker" || payload.module === "seva") {
-      return payload.module;
-    }
+    if (isAuthModuleHeader(payload.module)) return payload.module;
     return null;
   } catch {
     return null;
@@ -141,7 +145,10 @@ export function getAuthIntentFromHeaders(headers: Record<string, unknown>): stri
 export function notificationAudienceForIntent(intent: string | null | undefined): string | null {
   if (!intent) return null;
   const value = intent.toLowerCase();
-  if (value === "customer" || value === "resident" || value === "visitor") return "customer";
+  if (value === "customer" || value === "visitor") return "customer";
+  if (value === "resident") return "resident";
+  if (value === "society" || value === "apartment_admin") return "apartment_admin";
+  if (value === "guard" || value === "community_guard") return "guard";
   if (value === "supplier" || value === "tanker_supplier") return "supplier";
   if (value === "driver" || value === "tanker_driver") return "driver";
   if (value === "provider" || value === "seva_provider") return "provider";
@@ -150,6 +157,7 @@ export function notificationAudienceForIntent(intent: string | null | undefined)
     value === "tanker_super_admin" ||
     value === "tanker_admin" ||
     value === "seva_super_admin" ||
+    value === "community_super_admin" ||
     value === "super_admin" ||
     value === "admin"
   ) {
