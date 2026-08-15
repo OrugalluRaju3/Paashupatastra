@@ -38,6 +38,10 @@ import {
 
   isTankerSuperAdmin,
 
+  isSevaStaff,
+
+  isSevaSuperAdmin,
+
 } from "./types";
 
 
@@ -244,6 +248,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (purpose === "login" && (!portal || !intent)) {
         throw new Error("Select a role to continue login");
       }
+      if (!/^\d{10}$/.test(phone)) {
+        throw new Error("Enter a valid 10-digit mobile number");
+      }
 
       const payload: Record<string, string> = {
         phone,
@@ -404,7 +411,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           ? publicIntent === "supplier"
             ? "supplier"
             : "customer"
-          : publicIntent;
+          : authModule === "seva"
+            ? publicIntent === "provider"
+              ? "provider"
+              : "customer"
+            : publicIntent;
 
       const me = await api.post<AuthUser>(signupPath, {
 
@@ -520,6 +531,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             `This account does not have ${staffIntent.replaceAll("_", " ")} role.`,
 
           );
+
+        }
+
+      } else if (authModule === "seva") {
+
+        if (!isSevaStaff(loggedIn)) {
+
+          clearSession();
+
+          throw new Error(
+
+            "This account is not Seva staff. Ask Seva Super Admin to add staff role.",
+
+          );
+
+        }
+
+
+
+        if (staffIntent === "seva_super_admin" && !isSevaSuperAdmin(loggedIn)) {
+
+          clearSession();
+
+          throw new Error("This account does not have Seva Super Admin role.");
 
         }
 

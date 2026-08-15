@@ -1,12 +1,13 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api, qs } from "../api";
 import { useAuth } from "../auth/AuthContext";
-import { isParkingSuperAdmin, isTankerSuperAdmin } from "../auth/types";
+import { isParkingSuperAdmin, isSevaSuperAdmin, isTankerSuperAdmin } from "../auth/types";
 import { Modal } from "../components/Modal";
 import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
+import { digitsPhone } from "../lib/phone";
 
-type Module = "parking" | "tanker";
+type Module = "parking" | "tanker" | "seva";
 type Tab = "privacy" | "terms" | "faqs" | "support" | "announcements";
 type CreateKind = "privacy" | "terms" | "faq" | "announcement";
 
@@ -60,6 +61,8 @@ const TERMS_AUDIENCES = [
   { id: "parking_owner", label: "Parking owner" },
   { id: "tanker_supplier", label: "Water tanker supplier" },
   { id: "tanker_driver", label: "Driver" },
+  { id: "seva_provider", label: "Housekeeping provider" },
+  { id: "seva_worker", label: "Housekeeping worker" },
 ] as const;
 
 const ANN_AUDIENCES = [
@@ -68,7 +71,16 @@ const ANN_AUDIENCES = [
   { id: "tanker_suppliers", label: "Water suppliers" },
   { id: "tanker_drivers", label: "Drivers" },
   { id: "tanker_admins", label: "Tanker admins" },
+  { id: "seva_providers", label: "Housekeeping providers" },
+  { id: "seva_workers", label: "Housekeeping workers" },
+  { id: "seva_admins", label: "Seva admins" },
 ] as const;
+
+function moduleLabel(m: Module) {
+  if (m === "parking") return "Parking";
+  if (m === "tanker") return "Water tanker";
+  return "Housekeeping";
+}
 
 function toLocalInput(iso: string) {
   const d = new Date(iso);
@@ -108,8 +120,17 @@ export function ContentCmsPage() {
   const { user, module: authModule } = useAuth();
   const canParking = isParkingSuperAdmin(user);
   const canTanker = isTankerSuperAdmin(user);
+  const canSeva = isSevaSuperAdmin(user);
   const defaultModule: Module =
-    authModule === "tanker" && canTanker ? "tanker" : canParking ? "parking" : "tanker";
+    authModule === "seva" && canSeva
+      ? "seva"
+      : authModule === "tanker" && canTanker
+        ? "tanker"
+        : canParking
+          ? "parking"
+          : canTanker
+            ? "tanker"
+            : "seva";
 
   const [module, setModule] = useState<Module>(defaultModule);
   const [tab, setTab] = useState<Tab>("privacy");
@@ -123,9 +144,10 @@ export function ContentCmsPage() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (authModule === "tanker" && canTanker) setModule("tanker");
+    if (authModule === "seva" && canSeva) setModule("seva");
+    else if (authModule === "tanker" && canTanker) setModule("tanker");
     else if (authModule === "parking" && canParking) setModule("parking");
-  }, [authModule, canParking, canTanker]);
+  }, [authModule, canParking, canTanker, canSeva]);
 
   const [policyForm, setPolicyForm] = useState(emptyPolicyForm);
   const [termsForm, setTermsForm] = useState({
@@ -154,6 +176,11 @@ export function ContentCmsPage() {
     if (module === "parking") {
       return TERMS_AUDIENCES.filter((a) => a.id === "customer" || a.id === "parking_owner");
     }
+    if (module === "seva") {
+      return TERMS_AUDIENCES.filter(
+        (a) => a.id === "customer" || a.id === "seva_provider" || a.id === "seva_worker",
+      );
+    }
     return TERMS_AUDIENCES.filter(
       (a) => a.id === "customer" || a.id === "tanker_supplier" || a.id === "tanker_driver",
     );
@@ -162,6 +189,15 @@ export function ContentCmsPage() {
   const annAudienceOptions = useMemo(() => {
     if (module === "parking") {
       return ANN_AUDIENCES.filter((a) => a.id === "customers" || a.id === "parking_owners");
+    }
+    if (module === "seva") {
+      return ANN_AUDIENCES.filter(
+        (a) =>
+          a.id === "customers" ||
+          a.id === "seva_providers" ||
+          a.id === "seva_workers" ||
+          a.id === "seva_admins",
+      );
     }
     return ANN_AUDIENCES.filter(
       (a) =>
@@ -389,8 +425,8 @@ export function ContentCmsPage() {
     }
   }
 
-  if (!canParking && !canTanker) {
-    return <p className="error">Only Parking or Tanker Super Admin can manage content.</p>;
+  if (!canParking && !canTanker && !canSeva) {
+    return <p className="error">Only a module Super Admin can manage content.</p>;
   }
 
   const createTitle =
@@ -414,6 +450,7 @@ export function ContentCmsPage() {
         <div className="tabs">
           {(canParking ? (["parking"] as Module[]) : [])
             .concat(canTanker ? (["tanker"] as Module[]) : [])
+            .concat(canSeva ? (["seva"] as Module[]) : [])
             .map((m) => (
               <button
                 key={m}
@@ -421,7 +458,7 @@ export function ContentCmsPage() {
                 className={`intent${module === m ? " active" : ""}`}
                 onClick={() => setModule(m)}
               >
-                {m === "parking" ? "Parking" : "Water tanker"}
+                {moduleLabel(m)}
               </button>
             ))}
         </div>
@@ -639,16 +676,22 @@ export function ContentCmsPage() {
               <label htmlFor="support-phone">Support phone</label>
               <input
                 id="support-phone"
+                inputMode="numeric"
+                maxLength={10}
+                placeholder="10-digit mobile"
                 value={supportForm.supportPhone}
-                onChange={(e) => setSupportForm({ ...supportForm, supportPhone: e.target.value })}
+                onChange={(e) => setSupportForm({ ...supportForm, supportPhone: digitsPhone(e.target.value) })}
               />
             </div>
             <div className="field">
               <label htmlFor="support-whatsapp">WhatsApp</label>
               <input
                 id="support-whatsapp"
+                inputMode="numeric"
+                maxLength={10}
+                placeholder="10-digit mobile"
                 value={supportForm.whatsappNumber}
-                onChange={(e) => setSupportForm({ ...supportForm, whatsappNumber: e.target.value })}
+                onChange={(e) => setSupportForm({ ...supportForm, whatsappNumber: digitsPhone(e.target.value) })}
               />
             </div>
             <div className="field">

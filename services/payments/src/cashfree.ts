@@ -21,6 +21,10 @@ export function toCashfreeTankerOrderId(tankerOrderId: string | number) {
   return `tk${tankerOrderId}`;
 }
 
+export function toCashfreeSevaBookingId(sevaBookingId: string | number) {
+  return `sv${sevaBookingId}`;
+}
+
 export function bookingIdFromCashfreeOrderId(orderId: string): number | null {
   if (!orderId.startsWith("bk")) return null;
   const n = Number.parseInt(orderId.slice(2), 10);
@@ -30,6 +34,13 @@ export function bookingIdFromCashfreeOrderId(orderId: string): number | null {
 
 export function tankerOrderIdFromCashfreeOrderId(orderId: string): number | null {
   if (!orderId.startsWith("tk")) return null;
+  const n = Number.parseInt(orderId.slice(2), 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+export function sevaBookingIdFromCashfreeOrderId(orderId: string): number | null {
+  if (!orderId.startsWith("sv")) return null;
   const n = Number.parseInt(orderId.slice(2), 10);
   if (!Number.isFinite(n) || n <= 0) return null;
   return n;

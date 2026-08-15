@@ -4,6 +4,7 @@ export * from "./community";
 export * from "./parking";
 export * from "./parking-workflow";
 export * from "./tanker";
+export * from "./seva";
 export * from "./wallet";
 export * from "./content";
 export * from "./common";

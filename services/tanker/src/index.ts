@@ -374,7 +374,7 @@ function computePromoDiscount(promo: TankerPromoCodeEntity, amountInPaise: numbe
 
 const updateTankerVehicleSchema = z.object({
   driverFullName: z.string().min(2).max(120).optional(),
-  driverMobile: z.string().min(10).max(15).optional(),
+  driverMobile: phoneSchema.optional(),
   driverEmail: z.string().email().optional().nullable(),
   capacityLitres: z.number().int().positive().optional(),
   amountInPaise: z.number().int().nonnegative().optional(),

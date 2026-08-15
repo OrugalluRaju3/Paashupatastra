@@ -48,6 +48,7 @@ function canManageContent(headers: Record<string, unknown>, module?: string) {
   if (roles.includes(UserRole.SUPER_ADMIN)) return true;
   if (module === "parking" && roles.includes(UserRole.PARKING_SUPER_ADMIN)) return true;
   if (module === "tanker" && roles.includes(UserRole.TANKER_SUPER_ADMIN)) return true;
+  if (module === "seva" && roles.includes(UserRole.SEVA_SUPER_ADMIN)) return true;
   if (!module && roles.some((r) => ADMIN_ROLES.has(r))) return true;
   return false;
 }
@@ -145,6 +146,8 @@ function audienceForRoles(roles: string[]): string[] {
   if (roles.includes(UserRole.PARKING_OWNER)) out.push("parking_owners");
   if (roles.includes(UserRole.TANKER_SUPPLIER)) out.push("tanker_suppliers");
   if (roles.includes(UserRole.TANKER_DRIVER)) out.push("tanker_drivers");
+  if (roles.includes(UserRole.SEVA_PROVIDER)) out.push("seva_providers");
+  if (roles.includes(UserRole.SEVA_WORKER)) out.push("seva_workers");
   return out;
 }
 
@@ -564,7 +567,7 @@ async function main() {
           const audienceToRoles: Record<string, { roles: string[]; inboxAudience: string }> = {
             customers: {
               roles: [UserRole.CUSTOMER, UserRole.RESIDENT, UserRole.VISITOR],
-              inboxAudience: saved.module === "tanker" ? "customer" : "customer",
+              inboxAudience: "customer",
             },
             parking_owners: {
               roles: [UserRole.PARKING_OWNER],
@@ -580,6 +583,18 @@ async function main() {
             },
             tanker_admins: {
               roles: [UserRole.TANKER_SUPER_ADMIN],
+              inboxAudience: "admin",
+            },
+            seva_providers: {
+              roles: [UserRole.SEVA_PROVIDER],
+              inboxAudience: "provider",
+            },
+            seva_workers: {
+              roles: [UserRole.SEVA_WORKER],
+              inboxAudience: "worker",
+            },
+            seva_admins: {
+              roles: [UserRole.SEVA_SUPER_ADMIN],
               inboxAudience: "admin",
             },
           };

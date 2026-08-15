@@ -51,7 +51,8 @@ export function WalletPage() {
   const { intent, user } = useAuth();
   const isOwner = intent === "owner";
   const isSupplier = intent === "supplier";
-  const canWithdraw = isOwner || isSupplier;
+  const isProvider = intent === "provider";
+  const canWithdraw = isOwner || isSupplier || isProvider;
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [items, setItems] = useState<Txn[]>([]);
   const [page, setPage] = useState(1);
@@ -166,18 +167,58 @@ export function WalletPage() {
   const selectedBank = banks.find((b) => b.id === selectedBankId) ?? null;
   const maxRupees = wallet ? wallet.balanceInPaise / 100 : 0;
 
+  const title = isProvider
+    ? "Provider wallet"
+    : isSupplier
+      ? "Supplier wallet"
+      : isOwner
+        ? "Owner wallet"
+        : "My wallet";
+
+  const subtitle = isProvider
+    ? "Customer payments are held in the admin wallet until the job completes. Then platform fee is kept and the rest is credited here for withdrawal."
+    : isSupplier
+      ? "Customer payments are held in the admin wallet until delivery completes. Then platform fee is kept and the rest is credited here for withdrawal."
+      : isOwner
+        ? "Available balance is only credited after customer check-out (minus platform fee). Until then, payment stays in the admin/platform wallet."
+        : "Payments you made for bookings. Funds are held in the platform wallet until the service completes.";
+
+  const availableHint = canWithdraw
+    ? isProvider
+      ? "Withdrawable after job completion settlements"
+      : isSupplier
+        ? "Withdrawable after delivery settlements"
+        : "Withdrawable after check-out settlements"
+    : wallet
+      ? `${wallet.type} wallet · ${wallet.currency}`
+      : undefined;
+
+  const pendingHint = isProvider
+    ? "Paid jobs not yet completed"
+    : isSupplier
+      ? "Paid orders not yet delivered"
+      : "Paid bookings not yet checked out";
+
+  const emptyTxn = isProvider
+    ? "No payouts yet. After a job completes, settlement appears here."
+    : isSupplier
+      ? "No payouts yet. After a delivery completes, settlement appears here."
+      : isOwner
+        ? "No payouts yet. After a customer checks out, settlement appears here."
+        : "No payments yet. Book and pay for a service to see activity.";
+
+  const bankHolderHint = isProvider
+    ? "Account holder name should match your registered provider name."
+    : isSupplier
+      ? "Account holder name should match your registered supplier name."
+      : "Account holder name should match your registered owner name.";
+
   return (
     <>
       <div className="topbar">
         <div>
-          <h2>{isSupplier ? "Supplier wallet" : isOwner ? "Owner wallet" : "My wallet"}</h2>
-          <p>
-            {isSupplier
-              ? "Customer payments are held in the admin wallet until delivery completes. Then platform fee is kept and the rest is credited here for withdrawal."
-              : isOwner
-                ? "Available balance is only credited after customer check-out (minus platform fee). Until then, payment stays in the admin/platform wallet."
-                : "Payments you made for parking bookings. Funds are held in the platform wallet until check-out."}
-          </p>
+          <h2>{title}</h2>
+          <p>{subtitle}</p>
         </div>
         <button type="button" className="btn btn-ghost" onClick={() => void load()}>
           Refresh
@@ -188,25 +229,13 @@ export function WalletPage() {
         <KpiCard
           label="Available balance"
           value={wallet ? formatInrFromPaise(wallet.balanceInPaise) : "—"}
-          hint={
-            canWithdraw
-              ? isSupplier
-                ? "Withdrawable after delivery settlements"
-                : "Withdrawable after check-out settlements"
-              : wallet
-                ? `${wallet.type} wallet · ${wallet.currency}`
-                : undefined
-          }
+          hint={availableHint}
         />
         {canWithdraw ? (
           <KpiCard
             label="Pending (in admin wallet)"
             value={wallet ? formatInrFromPaise(wallet.pendingSettlementInPaise ?? 0) : "—"}
-            hint={
-              isSupplier
-                ? "Paid orders not yet delivered"
-                : "Paid bookings not yet checked out"
-            }
+            hint={pendingHint}
           />
         ) : null}
         <KpiCard label="Transactions" value={total} hint="All ledger entries" />
@@ -242,7 +271,7 @@ export function WalletPage() {
               <form className="withdraw-form" onSubmit={(e) => void onSaveBank(e)}>
                 <div className="withdraw-form-intro">
                   <h4>Bank account details</h4>
-                  <p>Account holder name should match your registered owner name.</p>
+                  <p>{bankHolderHint}</p>
                 </div>
                 <div className="grid-2">
                   <div className="field">
@@ -406,11 +435,7 @@ export function WalletPage() {
               {items.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="empty">
-                    {isSupplier
-                      ? "No payouts yet. After a delivery completes, settlement appears here."
-                      : isOwner
-                        ? "No payouts yet. After a customer checks out, settlement appears here."
-                        : "No payments yet. Book and pay for a parking slot to see activity."}
+                    {emptyTxn}
                   </td>
                 </tr>
               ) : null}

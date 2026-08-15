@@ -132,7 +132,7 @@ export const customerProfileSchema = z.object({
 export type CustomerProfileInput = z.infer<typeof customerProfileSchema>;
 
 export const publicSignupSchema = customerProfileSchema.extend({
-  intent: z.enum(["customer", "owner", "supplier"]),
+  intent: z.enum(["customer", "owner", "supplier", "provider"]),
 });
 
 export type PublicSignupInput = z.infer<typeof publicSignupSchema>;

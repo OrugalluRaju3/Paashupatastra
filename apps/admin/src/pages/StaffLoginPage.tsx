@@ -4,6 +4,7 @@ import { useAuth } from "../auth/AuthContext";
 import type { AuthModule, StaffIntent } from "../auth/types";
 import { staffHomePath } from "../auth/types";
 import { useToast } from "../components/Toast";
+import { digitsPhone } from "../lib/phone";
 
 const parkingOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
   { id: "parking_super_admin", label: "Parking Super Admin", hint: "Full parking staff console" },
@@ -15,13 +16,26 @@ const tankerOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
   { id: "tanker_super_admin", label: "Tanker Super Admin", hint: "Full tanker staff console" },
 ];
 
+const sevaOptions: Array<{ id: StaffIntent; label: string; hint: string }> = [
+  {
+    id: "seva_super_admin",
+    label: "Seva Super Admin",
+    hint: "Housekeeping & maintenance console",
+  },
+];
+
 export function StaffLoginPage({ module }: { module: AuthModule }) {
   const toast = useToast();
   const { token, portal, module: activeModule, requestOtp, loginStaff } = useAuth();
   const navigate = useNavigate();
-  const staffOptions = module === "tanker" ? tankerOptions : parkingOptions;
+  const staffOptions =
+    module === "tanker" ? tankerOptions : module === "seva" ? sevaOptions : parkingOptions;
   const defaultIntent: StaffIntent =
-    module === "tanker" ? "tanker_super_admin" : "parking_super_admin";
+    module === "tanker"
+      ? "tanker_super_admin"
+      : module === "seva"
+        ? "seva_super_admin"
+        : "parking_super_admin";
   const [intent, setIntent] = useState<StaffIntent>(defaultIntent);
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
@@ -30,10 +44,18 @@ export function StaffLoginPage({ module }: { module: AuthModule }) {
   const [debugOtp, setDebugOtp] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
 
-  const title = useMemo(
-    () => (module === "tanker" ? "Tanker staff" : "Parking staff"),
-    [module],
-  );
+  const title = useMemo(() => {
+    if (module === "tanker") return "Tanker staff";
+    if (module === "seva") return "Seva staff";
+    return "Parking staff";
+  }, [module]);
+
+  const subtitle = useMemo(() => {
+    if (module === "seva") {
+      return "Secure login for housekeeping & maintenance operations.";
+    }
+    return `Secure login for ${title.toLowerCase()} operations.`;
+  }, [module, title]);
 
   if (token && portal === "staff" && activeModule === module) {
     return <Navigate to={staffHomePath(module)} replace />;
@@ -80,7 +102,7 @@ export function StaffLoginPage({ module }: { module: AuthModule }) {
       <div className="auth-card">
         <p className="brand-kicker">{title}</p>
         <h1>{title} login</h1>
-        <p className="auth-sub">Secure login for {title.toLowerCase()} operations.</p>
+        <p className="auth-sub">{subtitle}</p>
 
         <div className="intent-stack">
           {staffOptions.map((opt) => (
@@ -88,7 +110,11 @@ export function StaffLoginPage({ module }: { module: AuthModule }) {
               key={opt.id}
               type="button"
               className={intent === opt.id ? "intent-row active" : "intent-row"}
-              onClick={() => setIntent(opt.id)}
+              onClick={() => {
+                setIntent(opt.id);
+                setOtpSent(false);
+                setOtp("");
+              }}
             >
               <strong>{opt.label}</strong>
               <span>{opt.hint}</span>
@@ -107,10 +133,14 @@ export function StaffLoginPage({ module }: { module: AuthModule }) {
                 required
                 placeholder="Registered staff mobile"
                 value={phone}
-                onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                onChange={(e) => setPhone(digitsPhone(e.target.value))}
               />
             </div>
-            <button className="btn btn-primary" type="submit" disabled={loading || phone.length !== 10}>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={loading || phone.length !== 10}
+            >
               {loading ? "Sending…" : "Send OTP"}
             </button>
           </form>
@@ -129,7 +159,11 @@ export function StaffLoginPage({ module }: { module: AuthModule }) {
               {otpHint ? <p className="auth-hint">{otpHint}</p> : null}
               {debugOtp ? <p className="auth-hint">Debug OTP: {debugOtp}</p> : null}
             </div>
-            <button className="btn btn-primary" type="submit" disabled={loading || otp.length < 4}>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={loading || otp.length < 4}
+            >
               {loading ? "Verifying…" : `Login to ${title.toLowerCase()} console`}
             </button>
             <button

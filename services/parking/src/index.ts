@@ -5,6 +5,7 @@ import {
   NotificationLogEntity,
   ParkingBookingEntity,
   ParkingBookingMessageEntity,
+  ParkingInvoiceEntity,
   ParkingListingEntity,
   ParkingSlotEntity,
   UserDocumentEntity,
@@ -199,6 +200,28 @@ function serializeBooking(row: ParkingBookingEntity) {
     createdAt: toIsoRequired(row.createdAt),
     updatedAt: toIsoRequired(row.updatedAt),
   };
+}
+
+function serializeInvoice(row: ParkingInvoiceEntity) {
+  return {
+    id: row.id,
+    invoiceNumber: `INV-PK-${row.id}`,
+    bookingId: row.bookingId,
+    renterUserId: row.renterUserId,
+    ownerUserId: row.ownerUserId,
+    amountInPaise: row.amountInPaise,
+    status: row.status,
+    createdAt: toIsoRequired(row.createdAt),
+    updatedAt: toIsoRequired(row.updatedAt),
+  };
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function canChatOnBooking(status: string) {
@@ -581,11 +604,178 @@ async function main() {
   const assignmentRepo = ds.getRepository(VerificationAssignmentEntity);
   const reportRepo = ds.getRepository(VerificationReportEntity);
   const bookingRepo = ds.getRepository(ParkingBookingEntity);
+  const invoiceRepo = ds.getRepository(ParkingInvoiceEntity);
   const messageRepo = ds.getRepository(ParkingBookingMessageEntity);
   const slotRepo = ds.getRepository(ParkingSlotEntity);
   const docRepo = ds.getRepository(UserDocumentEntity);
   const bankRepo = ds.getRepository(BankAccountEntity);
   const userRepo = ds.getRepository(UserEntity);
+
+  function isParkingInvoiceStaff(roles: string[]) {
+    return roles.includes(UserRole.PARKING_SUPER_ADMIN) || roles.includes(UserRole.SUPER_ADMIN);
+  }
+
+  async function ensureInvoiceForBooking(booking: ParkingBookingEntity) {
+    if (booking.paymentStatus !== PaymentStatus.PAID) return null;
+
+    let invoice = await invoiceRepo.findOne({ where: { bookingId: booking.id } });
+    const amount = booking.totalAmountInPaise || booking.amountInPaise;
+    if (invoice) {
+      if (invoice.amountInPaise !== amount || invoice.status !== PaymentStatus.PAID) {
+        invoice.amountInPaise = amount;
+        invoice.status = PaymentStatus.PAID;
+        invoice = await invoiceRepo.save(invoice);
+      }
+      return invoice;
+    }
+
+    return invoiceRepo.save(
+      invoiceRepo.create({
+        bookingId: booking.id,
+        renterUserId: booking.renterUserId,
+        ownerUserId: booking.ownerUserId,
+        amountInPaise: amount,
+        status: PaymentStatus.PAID,
+      }),
+    );
+  }
+
+  async function userCanAccessInvoice(
+    userId: number | null,
+    roles: string[],
+    invoice: ParkingInvoiceEntity,
+  ) {
+    if (!userId) return false;
+    if (isParkingInvoiceStaff(roles)) return true;
+    if (invoice.renterUserId === userId) return true;
+    return invoice.ownerUserId != null && invoice.ownerUserId === userId;
+  }
+
+  async function buildInvoiceDetail(invoice: ParkingInvoiceEntity) {
+    const booking = await bookingRepo.findOne({ where: { id: invoice.bookingId } });
+    const listing = booking?.listingId
+      ? await listingRepo.findOne({ where: { id: booking.listingId } })
+      : null;
+    const customer = await userRepo.findOne({ where: { id: invoice.renterUserId } });
+    const owner = invoice.ownerUserId
+      ? await userRepo.findOne({ where: { id: invoice.ownerUserId } })
+      : null;
+    const { slotLabel, addressBlock, locationExtra } = listingSummary(listing);
+
+    return {
+      ...serializeInvoice(invoice),
+      booking: booking
+        ? {
+            id: booking.id,
+            status: booking.status,
+            startAt: toIsoRequired(booking.startAt),
+            endAt: toIsoRequired(booking.endAt),
+            durationMinutes: booking.durationMinutes,
+            baseAmountInPaise: booking.baseAmountInPaise,
+            platformFeeInPaise: booking.platformFeeInPaise,
+            taxInPaise: booking.taxInPaise,
+            totalAmountInPaise: booking.totalAmountInPaise || booking.amountInPaise,
+            paymentStatus: booking.paymentStatus,
+            paymentProviderOrderId: booking.paymentProviderOrderId,
+            vehicleNumber: booking.vehicleNumber,
+            vehicleType: booking.vehicleType,
+            slotLabel,
+            addressBlock,
+            locationExtra,
+          }
+        : null,
+      customer: customer
+        ? {
+            id: customer.id,
+            name: customer.name,
+            phone: customer.phone,
+            email: customer.email,
+          }
+        : null,
+      owner: owner
+        ? {
+            id: owner.id,
+            name: owner.name,
+            phone: owner.phone,
+            email: owner.email,
+          }
+        : null,
+    };
+  }
+
+  function renderInvoiceHtml(detail: Awaited<ReturnType<typeof buildInvoiceDetail>>) {
+    const booking = detail.booking;
+    const issued = new Date(detail.createdAt).toLocaleString("en-IN");
+    const vehicle =
+      [booking?.vehicleType?.replaceAll("_", " "), booking?.vehicleNumber].filter(Boolean).join(" · ") ||
+      "—";
+    const rows = [
+      ["Parking", booking?.slotLabel ?? "—"],
+      ["Address", booking?.addressBlock ?? "—"],
+      ["Location", booking?.locationExtra ?? "—"],
+      ["Vehicle", vehicle],
+      ["Start", booking ? new Date(booking.startAt).toLocaleString("en-IN") : "—"],
+      ["End", booking ? new Date(booking.endAt).toLocaleString("en-IN") : "—"],
+      ["Duration", booking ? `${booking.durationMinutes} min` : "—"],
+      ["Base amount", formatInr(booking?.baseAmountInPaise ?? detail.amountInPaise)],
+      ["Platform fee", formatInr(booking?.platformFeeInPaise ?? 0)],
+      ["Tax", formatInr(booking?.taxInPaise ?? 0)],
+      ["Total paid", formatInr(booking?.totalAmountInPaise ?? detail.amountInPaise)],
+      ["Payment status", detail.status],
+      ["Booking status", booking?.status?.replaceAll("_", " ") ?? "—"],
+      ["Payment ref", booking?.paymentProviderOrderId ?? "—"],
+    ];
+
+    const tableRows = rows
+      .map(
+        ([label, value]) =>
+          `<tr><th style="text-align:left;padding:8px;border-bottom:1px solid #e5e7eb;color:#64748b;width:38%">${escapeHtml(String(label))}</th><td style="padding:8px;border-bottom:1px solid #e5e7eb">${escapeHtml(String(value))}</td></tr>`,
+      )
+      .join("");
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(detail.invoiceNumber)}</title>
+  <style>
+    body { font-family: Georgia, "Times New Roman", serif; color: #0f172a; margin: 0; background: #f8fafc; }
+    .sheet { max-width: 800px; margin: 24px auto; background: #fff; padding: 32px; border: 1px solid #e2e8f0; }
+    h1 { margin: 0 0 4px; font-size: 28px; }
+    .muted { color: #64748b; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+    .box { background: #f8fafc; padding: 12px 14px; border-radius: 8px; }
+    .total { font-size: 22px; font-weight: 700; margin-top: 16px; }
+    @media print { body { background: #fff; } .sheet { border: none; margin: 0; } .no-print { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <p class="muted no-print"><button onclick="window.print()">Print / Save as PDF</button></p>
+    <h1>Paashupatastra</h1>
+    <p class="muted">Parking invoice</p>
+    <p><strong>${escapeHtml(detail.invoiceNumber)}</strong><br/>Issued ${escapeHtml(issued)}<br/>Booking #${escapeHtml(String(detail.bookingId))}</p>
+    <div class="grid">
+      <div class="box">
+        <div class="muted">Billed to (customer)</div>
+        <strong>${escapeHtml(detail.customer?.name ?? "Customer")}</strong><br/>
+        ${escapeHtml(detail.customer?.phone ?? "—")}<br/>
+        ${escapeHtml(detail.customer?.email ?? "")}
+      </div>
+      <div class="box">
+        <div class="muted">Parking owner</div>
+        <strong>${escapeHtml(detail.owner?.name ?? "Owner")}</strong><br/>
+        ${escapeHtml(detail.owner?.phone ?? "—")}<br/>
+        ${escapeHtml(detail.owner?.email ?? "")}
+      </div>
+    </div>
+    <table style="width:100%;border-collapse:collapse">${tableRows}</table>
+    <p class="total">Amount paid: ${escapeHtml(formatInr(detail.amountInPaise))}</p>
+    <p class="muted">This is a computer-generated invoice for your parking booking.</p>
+  </div>
+</body>
+</html>`;
+  }
 
   await ds.query(`
     CREATE TABLE IF NOT EXISTS parking_booking_messages (
@@ -2147,6 +2337,12 @@ async function main() {
 
         await notifyBookingConfirmed(ds, { booking, listing, customer, owner });
 
+        try {
+          await ensureInvoiceForBooking(booking);
+        } catch (err) {
+          app.log.error({ err, bookingId: booking.id }, "Failed to create parking invoice after payment");
+        }
+
         const { navUrl } = listingSummary(listing);
         return {
           booking: serializeBooking(booking),
@@ -2300,6 +2496,12 @@ async function main() {
         booking.status = BookingStatus.COMPLETED;
         booking.checkedOutAt = new Date();
         await bookingRepo.save(booking);
+
+        try {
+          await ensureInvoiceForBooking(booking);
+        } catch (err) {
+          app.log.error({ err, bookingId: booking.id }, "Failed to ensure parking invoice on check-out");
+        }
 
         let settlement: Awaited<ReturnType<typeof settlePayment>> | null = null;
         let settlementError: string | null = null;
@@ -2856,6 +3058,117 @@ async function main() {
         booking.status = BookingStatus.CHECKED_IN;
         booking.checkedInAt = new Date();
         return serializeBooking(await bookingRepo.save(booking));
+      });
+
+      app.get("/v1/parking/invoices", async (request) => {
+        const query = paginationQuerySchema.parse(request.query);
+        const raw = request.query as { renterUserId?: string; ownerUserId?: string };
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+        const isStaff = isParkingInvoiceStaff(roles);
+
+        {
+          const paidQb = bookingRepo
+            .createQueryBuilder("b")
+            .where("b.payment_status = :paid", { paid: PaymentStatus.PAID })
+            .orderBy("b.created_at", "DESC")
+            .take(50);
+          if (raw.ownerUserId) {
+            paidQb.andWhere("b.owner_user_id = :ownerUserId", { ownerUserId: raw.ownerUserId });
+          }
+          if (raw.renterUserId) {
+            paidQb.andWhere("b.renter_user_id = :renterUserId", { renterUserId: raw.renterUserId });
+          }
+          if (userId && !isStaff && !raw.ownerUserId && !raw.renterUserId) {
+            paidQb.andWhere("(b.renter_user_id = :selfId OR b.owner_user_id = :selfId)", {
+              selfId: userId,
+            });
+          }
+          const paidBookings = await paidQb.getMany();
+          for (const paidBooking of paidBookings) {
+            try {
+              await ensureInvoiceForBooking(paidBooking);
+            } catch {
+              /* ignore backfill errors per booking */
+            }
+          }
+        }
+
+        const qb = invoiceRepo.createQueryBuilder("i").orderBy("i.created_at", "DESC");
+
+        if (raw.renterUserId) {
+          qb.andWhere("i.renter_user_id = :renterUserId", { renterUserId: raw.renterUserId });
+        }
+        if (raw.ownerUserId) {
+          qb.andWhere("i.owner_user_id = :ownerUserId", { ownerUserId: raw.ownerUserId });
+        }
+
+        if (userId && !isStaff) {
+          if (raw.ownerUserId && String(raw.ownerUserId) === String(userId)) {
+            qb.andWhere("i.owner_user_id = :ownedOwnerId", { ownedOwnerId: userId });
+          } else if (raw.renterUserId && String(raw.renterUserId) === String(userId)) {
+            qb.andWhere("i.renter_user_id = :selfRenterId", { selfRenterId: userId });
+          } else if (!raw.ownerUserId && !raw.renterUserId) {
+            qb.andWhere("(i.renter_user_id = :selfId OR i.owner_user_id = :selfId)", {
+              selfId: userId,
+            });
+          } else {
+            qb.andWhere("1 = 0");
+          }
+        }
+
+        const total = await qb.getCount();
+        const rows = await qb.skip((query.page - 1) * query.limit).take(query.limit).getMany();
+        return {
+          items: rows.map(serializeInvoice),
+          page: query.page,
+          limit: query.limit,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / query.limit)),
+        };
+      });
+
+      app.get("/v1/parking/invoices/:id", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+        const row = await invoiceRepo.findOne({ where: { id } });
+        if (!row) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Invoice not found" },
+          });
+        }
+        if (!(await userCanAccessInvoice(userId, roles, row))) {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Not your invoice" },
+          });
+        }
+        return buildInvoiceDetail(row);
+      });
+
+      app.get("/v1/parking/invoices/:id/download", async (request, reply) => {
+        const id = parseEntityId((request.params as { id: string }).id);
+        const userId = parseUserIdFromHeaders(request.headers as Record<string, unknown>);
+        const roles = getRolesFromHeaders(request.headers as Record<string, unknown>);
+        const row = await invoiceRepo.findOne({ where: { id } });
+        if (!row) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Invoice not found" },
+          });
+        }
+        if (!(await userCanAccessInvoice(userId, roles, row))) {
+          return reply.code(403).send({
+            error: { code: "FORBIDDEN", message: "Not your invoice" },
+          });
+        }
+
+        const detail = await buildInvoiceDetail(row);
+        const html = renderInvoiceHtml(detail);
+        const filename = `${detail.invoiceNumber}.html`;
+        return reply
+          .header("Content-Type", "text/html; charset=utf-8")
+          .header("Content-Disposition", `attachment; filename="${filename}"`)
+          .send(html);
       });
     },
   });

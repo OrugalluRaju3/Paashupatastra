@@ -3,6 +3,8 @@ import {
   BankAccountEntity,
   CommissionConfigEntity,
   ParkingBookingEntity,
+  SevaBookingEntity,
+  SevaProviderEntity,
   TankerOrderEntity,
   TankerSupplierEntity,
   TankerUserEntity,
@@ -16,6 +18,7 @@ import { createService, envInt, getRolesFromHeaders, getUserIdFromHeaders, loadE
 import {
   BookingStatus,
   PaymentStatus,
+  SevaBookingStatus,
   TankerOrderStatus,
   UserRole,
   WalletTxnType,
@@ -32,8 +35,10 @@ import {
   gatewayPublicUrl,
   getCashfreeOrder,
   isCashfreePaid,
+  sevaBookingIdFromCashfreeOrderId,
   tankerOrderIdFromCashfreeOrderId,
   toCashfreeOrderId,
+  toCashfreeSevaBookingId,
   toCashfreeTankerOrderId,
   verifyCashfreeWebhookSignature,
 } from "./cashfree";
@@ -41,21 +46,27 @@ import {
 const paymentOrderTargetBaseSchema = z.object({
   bookingId: z.coerce.number().int().positive().optional(),
   tankerOrderId: z.coerce.number().int().positive().optional(),
+  sevaBookingId: z.coerce.number().int().positive().optional(),
 });
 
-const paymentOrderTargetSchema = paymentOrderTargetBaseSchema.refine(
-  (d) => Boolean(d.bookingId) !== Boolean(d.tankerOrderId),
-  {
-    message: "Provide exactly one of bookingId or tankerOrderId",
-  },
-);
+function exactlyOnePaymentTarget(d: {
+  bookingId?: number;
+  tankerOrderId?: number;
+  sevaBookingId?: number;
+}) {
+  return [d.bookingId, d.tankerOrderId, d.sevaBookingId].filter((v) => v != null).length === 1;
+}
+
+const paymentOrderTargetSchema = paymentOrderTargetBaseSchema.refine(exactlyOnePaymentTarget, {
+  message: "Provide exactly one of bookingId, tankerOrderId, or sevaBookingId",
+});
 
 const paymentOrderVerifySchema = paymentOrderTargetBaseSchema
   .extend({
     orderId: z.string().min(3).optional(),
   })
-  .refine((d) => Boolean(d.bookingId) !== Boolean(d.tankerOrderId), {
-    message: "Provide exactly one of bookingId or tankerOrderId",
+  .refine(exactlyOnePaymentTarget, {
+    message: "Provide exactly one of bookingId, tankerOrderId, or sevaBookingId",
   });
 
 function tankerOrderAmountInPaise(order: TankerOrderEntity) {
@@ -68,6 +79,10 @@ function tankerOrderAmountInPaise(order: TankerOrderEntity) {
 
 function tankerServiceUrl() {
   return (process.env.TANKER_URL ?? "http://localhost:3007").replace(/\/$/, "");
+}
+
+function sevaServiceUrl() {
+  return (process.env.SEVA_URL ?? "http://localhost:3009").replace(/\/$/, "");
 }
 
 type TankerCustomerLike = Pick<TankerUserEntity, "id" | "phone" | "email" | "name">;
@@ -99,8 +114,30 @@ async function confirmTankerPayment(
   });
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
-    throw new Error(data?.error?.message ?? `Tanker confirm-payment failed (${res.status})`);
+    throw new Error(data?.error?.message ?? `Tanker confirm failed (${res.status})`);
   }
+  return res.json();
+}
+
+async function confirmSevaPayment(
+  sevaBookingId: number,
+  customerUserId: number,
+  orderId: string,
+  source: string,
+) {
+  const res = await fetch(`${sevaServiceUrl()}/v1/seva/bookings/${sevaBookingId}/confirm-payment`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": String(customerUserId),
+    },
+    body: JSON.stringify({ orderId, source }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new Error(data?.error?.message ?? `Seva confirm failed (${res.status})`);
+  }
+  return res.json();
 }
 
 /**
@@ -183,7 +220,11 @@ async function getOrCreateWallet(repo: Repository<WalletEntity>, userId: number,
 
 function walletTypeForUser(headers: Record<string, unknown>) {
   const roles = getRolesFromHeaders(headers);
-  if (roles.includes(UserRole.PARKING_OWNER) || roles.includes(UserRole.TANKER_SUPPLIER)) {
+  if (
+    roles.includes(UserRole.PARKING_OWNER) ||
+    roles.includes(UserRole.TANKER_SUPPLIER) ||
+    roles.includes(UserRole.SEVA_PROVIDER)
+  ) {
     return "owner";
   }
   return "customer";
@@ -210,6 +251,26 @@ function supplierShareFromTankerOrder(order: TankerOrderEntity) {
     platformFee,
     tax,
     supplierShare: Math.max(0, total - platformFee - tax),
+  };
+}
+
+function sevaBookingAmountInPaise(booking: SevaBookingEntity) {
+  return (
+    booking.totalAmountInPaise ||
+    booking.amountInPaise + booking.platformFeeInPaise + booking.taxInPaise ||
+    booking.amountInPaise
+  );
+}
+
+function providerShareFromSevaBooking(booking: SevaBookingEntity) {
+  const total = sevaBookingAmountInPaise(booking);
+  const platformFee = booking.platformFeeInPaise || 0;
+  const tax = booking.taxInPaise || 0;
+  return {
+    total,
+    platformFee,
+    tax,
+    providerShare: Math.max(0, total - platformFee - tax),
   };
 }
 
@@ -438,6 +499,149 @@ async function settleTankerOrderToSupplier(
   };
 }
 
+async function creditPlatformFromSevaBooking(
+  booking: SevaBookingEntity,
+  walletRepo: Repository<WalletEntity>,
+  txnRepo: Repository<WalletTransactionEntity>,
+  notes: string,
+) {
+  const existing = await txnRepo.findOne({
+    where: {
+      referenceId: booking.id,
+      purpose: "seva_booking_payment",
+      type: WalletTxnType.CREDIT,
+    },
+  });
+  if (existing) {
+    const platformWallet = await getPlatformWallet(walletRepo);
+    return {
+      ok: true as const,
+      alreadyPaid: true,
+      platformBalanceInPaise: Number(platformWallet.balanceInPaise),
+      sevaBookingId: booking.id,
+      amountInPaise: Number(existing.amountInPaise),
+    };
+  }
+
+  const amount = sevaBookingAmountInPaise(booking);
+  const platformWallet = await getPlatformWallet(walletRepo);
+  const newBalance = Number(platformWallet.balanceInPaise) + amount;
+  platformWallet.balanceInPaise = String(newBalance);
+  await walletRepo.save(platformWallet);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: platformWallet.id,
+      type: WalletTxnType.CREDIT,
+      amountInPaise: String(amount),
+      balanceAfterInPaise: String(newBalance),
+      purpose: "seva_booking_payment",
+      referenceId: booking.id,
+      notes,
+    }),
+  );
+
+  const customerWallet = await getOrCreateWallet(walletRepo, booking.customerUserId, "customer");
+  const customerBal = Number(customerWallet.balanceInPaise);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: customerWallet.id,
+      type: WalletTxnType.DEBIT,
+      amountInPaise: String(amount),
+      balanceAfterInPaise: String(customerBal),
+      purpose: "seva_booking_payment",
+      referenceId: booking.id,
+      notes: "Paid for Seva booking via Cashfree (held in platform wallet until completion)",
+    }),
+  );
+
+  return {
+    ok: true as const,
+    alreadyPaid: false,
+    platformBalanceInPaise: newBalance,
+    sevaBookingId: booking.id,
+    amountInPaise: amount,
+  };
+}
+
+async function settleSevaBookingToProvider(
+  booking: SevaBookingEntity,
+  providerUserId: number,
+  walletRepo: Repository<WalletEntity>,
+  txnRepo: Repository<WalletTransactionEntity>,
+) {
+  const alreadySettled = await txnRepo.findOne({
+    where: {
+      referenceId: booking.id,
+      purpose: "seva_settlement",
+      type: WalletTxnType.CREDIT,
+    },
+  });
+  if (alreadySettled) {
+    const providerWallet = await getOrCreateWallet(walletRepo, providerUserId, "owner");
+    const platformWallet = await getPlatformWallet(walletRepo);
+    return {
+      ok: true as const,
+      alreadySettled: true,
+      providerShareInPaise: Number(alreadySettled.amountInPaise),
+      platformFeeInPaise: booking.platformFeeInPaise || 0,
+      taxInPaise: booking.taxInPaise || 0,
+      providerBalanceInPaise: Number(providerWallet.balanceInPaise),
+      platformBalanceInPaise: Number(platformWallet.balanceInPaise),
+    };
+  }
+
+  const { platformFee, tax, providerShare } = providerShareFromSevaBooking(booking);
+  const platformWallet = await getPlatformWallet(walletRepo);
+  const providerWallet = await getOrCreateWallet(walletRepo, providerUserId, "owner");
+
+  const platformBal = Number(platformWallet.balanceInPaise) - providerShare;
+  if (platformBal < 0) {
+    throw Object.assign(new Error("Platform wallet does not hold enough to settle this Seva booking"), {
+      statusCode: 409,
+      code: "INSUFFICIENT_PLATFORM_BALANCE",
+    });
+  }
+
+  platformWallet.balanceInPaise = String(platformBal);
+  await walletRepo.save(platformWallet);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: platformWallet.id,
+      type: WalletTxnType.DEBIT,
+      amountInPaise: String(providerShare),
+      balanceAfterInPaise: String(platformBal),
+      purpose: "seva_settlement",
+      referenceId: booking.id,
+      notes: "Release provider share from platform escrow after job completion",
+    }),
+  );
+
+  const providerBal = Number(providerWallet.balanceInPaise) + providerShare;
+  providerWallet.balanceInPaise = String(providerBal);
+  await walletRepo.save(providerWallet);
+  await txnRepo.save(
+    txnRepo.create({
+      walletId: providerWallet.id,
+      type: WalletTxnType.CREDIT,
+      amountInPaise: String(providerShare),
+      balanceAfterInPaise: String(providerBal),
+      purpose: "seva_settlement",
+      referenceId: booking.id,
+      notes: `Provider credit after completion (platform fee ${platformFee} paise, tax ${tax} paise retained)`,
+    }),
+  );
+
+  return {
+    ok: true as const,
+    alreadySettled: false,
+    providerShareInPaise: providerShare,
+    platformFeeInPaise: platformFee,
+    taxInPaise: tax,
+    providerBalanceInPaise: providerBal,
+    platformBalanceInPaise: platformBal,
+  };
+}
+
 async function main() {
   loadEnv();
   const ds = await getDataSource();
@@ -448,6 +652,8 @@ async function main() {
   const tankerOrderRepo = ds.getRepository(TankerOrderEntity);
   const tankerUserRepo = ds.getRepository(TankerUserEntity);
   const tankerSupplierRepo = ds.getRepository(TankerSupplierEntity);
+  const sevaBookingRepo = ds.getRepository(SevaBookingEntity);
+  const sevaProviderRepo = ds.getRepository(SevaProviderEntity);
   const userRepo = ds.getRepository(UserEntity);
   const bankRepo = ds.getRepository(BankAccountEntity);
 
@@ -560,6 +766,36 @@ async function main() {
               }
             }
           }
+
+          if (roles.includes(UserRole.SEVA_PROVIDER)) {
+            const provider = await sevaProviderRepo.findOne({ where: { userId } });
+            if (provider) {
+              const heldBookings = await sevaBookingRepo.find({
+                where: {
+                  providerId: provider.id,
+                  paymentStatus: PaymentStatus.PAID,
+                  status: In([
+                    SevaBookingStatus.ACCEPTED,
+                    SevaBookingStatus.SCHEDULED,
+                    SevaBookingStatus.ON_THE_WAY,
+                    SevaBookingStatus.IN_PROGRESS,
+                  ]),
+                },
+              });
+              for (const b of heldBookings) {
+                const settled = await txnRepo.exist({
+                  where: {
+                    referenceId: b.id,
+                    purpose: "seva_settlement",
+                    type: WalletTxnType.CREDIT,
+                  },
+                });
+                if (!settled) {
+                  pendingSettlementInPaise += providerShareFromSevaBooking(b).providerShare;
+                }
+              }
+            }
+          }
         }
 
         return {
@@ -609,11 +845,15 @@ async function main() {
           return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
         }
         const roles = getRolesFromHeaders(headers);
-        if (!roles.includes(UserRole.PARKING_OWNER) && !roles.includes(UserRole.TANKER_SUPPLIER)) {
+        if (
+          !roles.includes(UserRole.PARKING_OWNER) &&
+          !roles.includes(UserRole.TANKER_SUPPLIER) &&
+          !roles.includes(UserRole.SEVA_PROVIDER)
+        ) {
           return reply.code(403).send({
             error: {
               code: "FORBIDDEN",
-              message: "Only parking owners or tanker suppliers can withdraw to bank",
+              message: "Only parking owners, tanker suppliers, or Seva providers can withdraw to bank",
             },
           });
         }
@@ -676,7 +916,14 @@ async function main() {
           (await tankerUserRepo.findOne({ where: { id: userId } }));
         const title = "Wallet withdrawal initiated";
         const notifyBody = [
-          `Hello ${user?.name ?? (roles.includes(UserRole.TANKER_SUPPLIER) ? "Supplier" : "Owner")},`,
+          `Hello ${
+            user?.name ??
+            (roles.includes(UserRole.TANKER_SUPPLIER)
+              ? "Supplier"
+              : roles.includes(UserRole.SEVA_PROVIDER)
+                ? "Provider"
+                : "Owner")
+          },`,
           "",
           `Your withdrawal of ₹${(amount / 100).toFixed(2)} has been initiated.`,
           `Bank: ${bank.bankName}`,
@@ -687,13 +934,14 @@ async function main() {
           "Funds are typically credited within 1–2 business days (sandbox: simulated instantly).",
         ].join("\n");
         const isTankerSupplier = roles.includes(UserRole.TANKER_SUPPLIER);
+        const isSevaProvider = roles.includes(UserRole.SEVA_PROVIDER);
         void fetch(`${notificationsUrl}/v1/notifications/send`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             userId,
-            module: isTankerSupplier ? "tanker" : "parking",
-            audience: isTankerSupplier ? "supplier" : "owner",
+            module: isTankerSupplier ? "tanker" : isSevaProvider ? "seva" : "parking",
+            audience: isTankerSupplier ? "supplier" : isSevaProvider ? "provider" : "owner",
             channel: "in_app",
             title,
             body: `₹${(amount / 100).toFixed(2)} withdrawn to ${bank.bankName} (${masked}).`,
@@ -857,6 +1105,101 @@ async function main() {
           }
         }
 
+        if (body.sevaBookingId) {
+          const booking = await sevaBookingRepo.findOne({ where: { id: body.sevaBookingId } });
+          if (!booking) {
+            return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Seva booking not found" } });
+          }
+          if (booking.customerUserId !== userId) {
+            return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your Seva booking" } });
+          }
+          if (booking.paymentStatus === "paid") {
+            return reply.code(400).send({
+              error: { code: "ALREADY_PAID", message: "Seva booking is already paid" },
+            });
+          }
+          if (
+            booking.status === "cancelled" ||
+            booking.status === "rejected"
+          ) {
+            return reply.code(400).send({
+              error: {
+                code: "INVALID_STATE",
+                message:
+                  booking.status === "cancelled"
+                    ? "Payment window of 10 minutes has expired. The worker was released."
+                    : "Cannot pay for this booking",
+              },
+            });
+          }
+          if (booking.paymentDueAt && new Date(booking.paymentDueAt).getTime() < Date.now()) {
+            return reply.code(400).send({
+              error: {
+                code: "PAYMENT_WINDOW_EXPIRED",
+                message: "Payment window of 10 minutes has expired. The worker was released.",
+              },
+            });
+          }
+
+          const customer = await userRepo.findOne({ where: { id: booking.customerUserId } });
+          if (!customer?.phone) {
+            return reply.code(400).send({
+              error: { code: "CUSTOMER_PHONE_REQUIRED", message: "Customer phone is required for Cashfree" },
+            });
+          }
+
+          const orderId = toCashfreeSevaBookingId(booking.id);
+          const amountInPaise = sevaBookingAmountInPaise(booking);
+          const amountInr = amountInPaise / 100;
+          const returnUrl = `${appPublicUrl()}/app/seva/payment/return?seva_booking_id=${booking.id}&order_id={order_id}`;
+          const notifyUrl = `${gatewayPublicUrl()}/v1/payments/webhooks/cashfree`;
+
+          try {
+            let cashfreeOrder;
+            try {
+              cashfreeOrder = await createCashfreeOrder({
+                orderId,
+                amountInr,
+                customerId: String(customer.id),
+                customerPhone: customer.phone,
+                customerEmail: customer.email,
+                customerName: customer.name,
+                returnUrl,
+                notifyUrl,
+                orderNote: "Paashupatastra Seva booking",
+              });
+            } catch (createErr) {
+              cashfreeOrder = await getCashfreeOrder(orderId);
+              if (!cashfreeOrder.payment_session_id) throw createErr;
+            }
+
+            booking.paymentProvider = "cashfree";
+            booking.paymentProviderOrderId = cashfreeOrder.order_id ?? orderId;
+            await sevaBookingRepo.save(booking);
+
+            return reply.code(201).send({
+              id: booking.id,
+              sevaBookingId: booking.id,
+              orderId: cashfreeOrder.order_id ?? orderId,
+              paymentSessionId: cashfreeOrder.payment_session_id,
+              amountInPaise,
+              amountInr,
+              currency: "INR",
+              status: cashfreeOrder.order_status ?? "ACTIVE",
+              provider: "cashfree",
+              env: cfg.env,
+              returnUrl,
+            });
+          } catch (err) {
+            return reply.code(502).send({
+              error: {
+                code: "CASHFREE_ORDER_FAILED",
+                message: err instanceof Error ? err.message : "Failed to create Cashfree order",
+              },
+            });
+          }
+        }
+
         const booking = await bookingRepo.findOne({ where: { id: body.bookingId! } });
         if (!booking) {
           return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Booking not found" } });
@@ -994,6 +1337,77 @@ async function main() {
             return {
               ok: true,
               tankerOrderId: tankerOrder.id,
+              orderId: order.order_id ?? orderId,
+              orderStatus: order.order_status,
+              provider: "cashfree",
+              platformBalanceInPaise: credited.platformBalanceInPaise,
+              amountInPaise: credited.amountInPaise,
+            };
+          } catch (err) {
+            return reply.code(502).send({
+              error: {
+                code: "CASHFREE_VERIFY_FAILED",
+                message: err instanceof Error ? err.message : "Payment verification failed",
+              },
+            });
+          }
+        }
+
+        if (body.sevaBookingId) {
+          const sevaBooking = await sevaBookingRepo.findOne({ where: { id: body.sevaBookingId } });
+          if (!sevaBooking) {
+            return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Seva booking not found" } });
+          }
+          if (sevaBooking.customerUserId !== userId) {
+            return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Not your Seva booking" } });
+          }
+
+          const orderId =
+            body.orderId ?? sevaBooking.paymentProviderOrderId ?? toCashfreeSevaBookingId(sevaBooking.id);
+
+          try {
+            const order = await getCashfreeOrder(orderId);
+            if (!isCashfreePaid(order.order_status)) {
+              return reply.code(402).send({
+                error: {
+                  code: "PAYMENT_PENDING",
+                  message: `Cashfree order status is ${order.order_status ?? "UNKNOWN"}. Complete payment first.`,
+                },
+                orderStatus: order.order_status,
+                orderId,
+              });
+            }
+
+            sevaBooking.paymentProviderOrderId = order.order_id ?? orderId;
+            await sevaBookingRepo.save(sevaBooking);
+
+            try {
+              await confirmSevaPayment(
+                sevaBooking.id,
+                sevaBooking.customerUserId,
+                order.order_id ?? orderId,
+                "cashfree_verify",
+              );
+            } catch (err) {
+              return reply.code(502).send({
+                error: {
+                  code: "SEVA_CONFIRM_FAILED",
+                  message: err instanceof Error ? err.message : "Failed to confirm Seva payment",
+                },
+              });
+            }
+
+            const fresh = await sevaBookingRepo.findOne({ where: { id: sevaBooking.id } });
+            const credited = await creditPlatformFromSevaBooking(
+              fresh ?? sevaBooking,
+              walletRepo,
+              txnRepo,
+              "Customer Seva payment collected via Cashfree to platform wallet",
+            );
+
+            return {
+              ok: true,
+              sevaBookingId: sevaBooking.id,
               orderId: order.order_id ?? orderId,
               orderStatus: order.order_status,
               provider: "cashfree",
@@ -1312,6 +1726,94 @@ async function main() {
         }
       });
 
+      app.post("/v1/payments/seva-bookings/:sevaBookingId/collect", async (request, reply) => {
+        const sevaBookingId = parseEntityId(
+          (request.params as { sevaBookingId: string }).sevaBookingId,
+        );
+        const booking = await sevaBookingRepo.findOne({ where: { id: sevaBookingId } });
+        if (!booking) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Seva booking not found" },
+          });
+        }
+        if (booking.paymentStatus !== PaymentStatus.PAID) {
+          return reply.code(400).send({
+            error: {
+              code: "NOT_PAID",
+              message: "Confirm Seva payment before collecting into platform wallet",
+            },
+          });
+        }
+
+        try {
+          const result = await creditPlatformFromSevaBooking(
+            booking,
+            walletRepo,
+            txnRepo,
+            "Customer Seva payment collected to platform wallet",
+          );
+          return result;
+        } catch (err) {
+          const statusCode = (err as { statusCode?: number }).statusCode ?? 500;
+          return reply.code(statusCode).send({
+            error: {
+              code: "COLLECT_FAILED",
+              message: err instanceof Error ? err.message : "Collect failed",
+            },
+          });
+        }
+      });
+
+      app.post("/v1/payments/seva-bookings/:sevaBookingId/settle", async (request, reply) => {
+        const sevaBookingId = parseEntityId(
+          (request.params as { sevaBookingId: string }).sevaBookingId,
+        );
+        const booking = await sevaBookingRepo.findOne({ where: { id: sevaBookingId } });
+        if (!booking) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Seva booking not found" },
+          });
+        }
+        if (booking.status !== SevaBookingStatus.COMPLETED) {
+          return reply.code(400).send({
+            error: {
+              code: "NOT_COMPLETED",
+              message: "Settle only after the job is completed",
+            },
+          });
+        }
+        if (booking.paymentStatus !== PaymentStatus.PAID) {
+          return reply.code(400).send({
+            error: { code: "NOT_PAID", message: "Cannot settle an unpaid Seva booking" },
+          });
+        }
+
+        const provider = await sevaProviderRepo.findOne({ where: { id: booking.providerId } });
+        if (!provider?.userId) {
+          return reply.code(400).send({
+            error: { code: "NO_PROVIDER", message: "Seva booking has no provider user" },
+          });
+        }
+
+        try {
+          const result = await settleSevaBookingToProvider(
+            booking,
+            provider.userId,
+            walletRepo,
+            txnRepo,
+          );
+          return result;
+        } catch (err) {
+          const statusCode = (err as { statusCode?: number }).statusCode ?? 500;
+          return reply.code(statusCode).send({
+            error: {
+              code: (err as { code?: string }).code ?? "SETTLE_FAILED",
+              message: err instanceof Error ? err.message : "Settlement failed",
+            },
+          });
+        }
+      });
+
       app.post("/v1/payments/webhooks/cashfree", async (request, reply) => {
         const rawBody = JSON.stringify(request.body ?? {});
         const timestamp = String(request.headers["x-webhook-timestamp"] ?? "");
@@ -1373,46 +1875,92 @@ async function main() {
           ? await tankerOrderRepo.findOne({ where: { id: tankerOrderId } })
           : await tankerOrderRepo.findOne({ where: { paymentProviderOrderId: orderId } });
 
-        if (!tankerOrder) return { received: true, matched: false };
+        if (tankerOrder) {
+          const paid =
+            isCashfreePaid(orderStatus) ||
+            (paymentStatus ?? "").toUpperCase() === "SUCCESS" ||
+            payload?.type === "PAYMENT_SUCCESS_WEBHOOK";
 
-        const paid =
+          if (paid && tankerOrder.paymentStatus !== "paid") {
+            tankerOrder.paymentProviderOrderId = orderId;
+            tankerOrder.paymentProvider = "cashfree";
+            await tankerOrderRepo.save(tankerOrder);
+            try {
+              await confirmTankerPayment(
+                tankerOrder.id,
+                tankerOrder.customerUserId,
+                orderId,
+                "cashfree_webhook",
+              );
+            } catch (err) {
+              app.log.error({ err }, "Failed to confirm tanker after Cashfree webhook");
+            }
+          }
+
+          if (paid) {
+            const fresh = await tankerOrderRepo.findOne({ where: { id: tankerOrder.id } });
+            if (fresh && fresh.paymentStatus === PaymentStatus.PAID) {
+              try {
+                await creditPlatformFromTankerOrder(
+                  fresh,
+                  walletRepo,
+                  txnRepo,
+                  "Customer tanker payment collected via Cashfree webhook to platform wallet",
+                );
+              } catch (err) {
+                app.log.error({ err }, "Failed to credit platform wallet for tanker order");
+              }
+            }
+          }
+
+          return { received: true, matched: true, tankerOrderId: tankerOrder.id };
+        }
+
+        const sevaBookingId = sevaBookingIdFromCashfreeOrderId(orderId);
+        const sevaBooking = sevaBookingId
+          ? await sevaBookingRepo.findOne({ where: { id: sevaBookingId } })
+          : await sevaBookingRepo.findOne({ where: { paymentProviderOrderId: orderId } });
+
+        if (!sevaBooking) return { received: true, matched: false };
+
+        const sevaPaid =
           isCashfreePaid(orderStatus) ||
           (paymentStatus ?? "").toUpperCase() === "SUCCESS" ||
           payload?.type === "PAYMENT_SUCCESS_WEBHOOK";
 
-        if (paid && tankerOrder.paymentStatus !== "paid") {
-          tankerOrder.paymentProviderOrderId = orderId;
-          tankerOrder.paymentProvider = "cashfree";
-          await tankerOrderRepo.save(tankerOrder);
+        if (sevaPaid && sevaBooking.paymentStatus !== "paid") {
+          sevaBooking.paymentProviderOrderId = orderId;
+          sevaBooking.paymentProvider = "cashfree";
+          await sevaBookingRepo.save(sevaBooking);
           try {
-            await confirmTankerPayment(
-              tankerOrder.id,
-              tankerOrder.customerUserId,
+            await confirmSevaPayment(
+              sevaBooking.id,
+              sevaBooking.customerUserId,
               orderId,
               "cashfree_webhook",
             );
           } catch (err) {
-            app.log.error({ err }, "Failed to confirm tanker after Cashfree webhook");
+            app.log.error({ err }, "Failed to confirm Seva after Cashfree webhook");
           }
         }
 
-        if (paid) {
-          const fresh = await tankerOrderRepo.findOne({ where: { id: tankerOrder.id } });
+        if (sevaPaid) {
+          const fresh = await sevaBookingRepo.findOne({ where: { id: sevaBooking.id } });
           if (fresh && fresh.paymentStatus === PaymentStatus.PAID) {
             try {
-              await creditPlatformFromTankerOrder(
+              await creditPlatformFromSevaBooking(
                 fresh,
                 walletRepo,
                 txnRepo,
-                "Customer tanker payment collected via Cashfree webhook to platform wallet",
+                "Customer Seva payment collected via Cashfree webhook to platform wallet",
               );
             } catch (err) {
-              app.log.error({ err }, "Failed to credit platform wallet for tanker order");
+              app.log.error({ err }, "Failed to credit platform wallet for Seva booking");
             }
           }
         }
 
-        return { received: true, matched: true, tankerOrderId: tankerOrder.id };
+        return { received: true, matched: true, sevaBookingId: sevaBooking.id };
       });
     },
   });

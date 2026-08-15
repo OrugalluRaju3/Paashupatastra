@@ -41,7 +41,8 @@ function audienceForIntent(intent: string | null | undefined) {
 export function HelpCenterPage({ section = "faq" }: { section?: Section }) {
   const toast = useToast();
   const { module, intent } = useAuth();
-  const contentModule = module === "tanker" ? "tanker" : "parking";
+  const contentModule =
+    module === "tanker" ? "tanker" : module === "seva" ? "seva" : "parking";
   const [faqs, setFaqs] = useState<Faq[]>([]);
   const [privacy, setPrivacy] = useState<Doc | null>(null);
   const [terms, setTerms] = useState<Doc | null>(null);

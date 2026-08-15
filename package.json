@@ -21,9 +21,10 @@
     "dev:notifications": "npm run dev -w @paashupatastra/notifications",
     "dev:tanker": "npm run dev -w @paashupatastra/tanker",
     "dev:content": "npm run dev -w @paashupatastra/content",
+    "dev:seva": "npm run dev -w @paashupatastra/seva",
     "dev:gateway": "npm run dev -w @paashupatastra/gateway",
     "dev:admin": "npm run dev -w @paashupatastra/admin",
-    "dev:services": "npm run dev -w @paashupatastra/auth & npm run dev -w @paashupatastra/users & npm run dev -w @paashupatastra/communities & npm run dev -w @paashupatastra/parking & npm run dev -w @paashupatastra/payments & npm run dev -w @paashupatastra/notifications & npm run dev -w @paashupatastra/tanker & npm run dev -w @paashupatastra/content & npm run dev -w @paashupatastra/gateway",
+    "dev:services": "npm run dev -w @paashupatastra/auth & npm run dev -w @paashupatastra/users & npm run dev -w @paashupatastra/communities & npm run dev -w @paashupatastra/parking & npm run dev -w @paashupatastra/payments & npm run dev -w @paashupatastra/notifications & npm run dev -w @paashupatastra/tanker & npm run dev -w @paashupatastra/content & npm run dev -w @paashupatastra/seva & npm run dev -w @paashupatastra/gateway",
     "lint": "npm run lint --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

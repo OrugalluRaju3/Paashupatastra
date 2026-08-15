@@ -13,6 +13,7 @@ import { ListingsPage } from "./pages/ListingsPage";
 import { ManagerReporteesPage } from "./pages/ManagerReporteesPage";
 import { OwnerBookingsPage } from "./pages/OwnerBookingsPage";
 import { OwnerHomePage } from "./pages/OwnerHomePage";
+import { ParkingInvoicesPage } from "./pages/ParkingInvoicesPage";
 import { ParkingSlotsPage } from "./pages/ParkingSlotsPage";
 import { PaymentReturnPage } from "./pages/PaymentReturnPage";
 import { PublicLoginPage } from "./pages/PublicLoginPage";
@@ -22,6 +23,10 @@ import { TankerCustomerPage } from "./pages/TankerCustomerPage";
 import { TankerDriverPage } from "./pages/TankerDriverPage";
 import { TankerStaffPage } from "./pages/TankerStaffPage";
 import { TankerSupplierPage } from "./pages/TankerSupplierPage";
+import { SevaCustomerPage } from "./pages/SevaCustomerPage";
+import { SevaProviderPage } from "./pages/SevaProviderPage";
+import { SevaWorkerPage } from "./pages/SevaWorkerPage";
+import { SevaStaffPage } from "./pages/SevaStaffPage";
 import { ContentCmsPage } from "./pages/ContentCmsPage";
 import { HelpCenterPage } from "./pages/HelpCenterPage";
 import { ParkingUsersPage, StaffUsersPage, TankerUsersPage } from "./pages/UsersPage";
@@ -39,9 +44,11 @@ export default function App() {
             <Route path="/login" element={<Navigate to="/" replace />} />
             <Route path="/login/parking" element={<PublicLoginPage module="parking" />} />
             <Route path="/login/tanker" element={<PublicLoginPage module="tanker" />} />
+            <Route path="/login/seva" element={<PublicLoginPage module="seva" />} />
             <Route path="/staff/login" element={<Navigate to="/" replace />} />
             <Route path="/staff/login/parking" element={<StaffLoginPage module="parking" />} />
             <Route path="/staff/login/tanker" element={<StaffLoginPage module="tanker" />} />
+            <Route path="/staff/login/seva" element={<StaffLoginPage module="seva" />} />
 
             <Route element={<RequireAuth portal="staff" />}>
               <Route path="/staff" element={<StaffLayout />}>
@@ -51,6 +58,7 @@ export default function App() {
                   <Route path="verification" element={<VerificationPage />} />
                   <Route path="reportees" element={<ManagerReporteesPage />} />
                   <Route path="bookings" element={<BookingsPage />} />
+                  <Route path="invoices" element={<ParkingInvoicesPage audience="staff" />} />
                   <Route path="users" element={<StaffUsersPage />} />
                   <Route path="users/parking" element={<ParkingUsersPage />} />
                   <Route path="settings" element={<SettingsPage />} />
@@ -59,6 +67,9 @@ export default function App() {
                 <Route element={<RequireModule module="tanker" />}>
                   <Route path="tanker" element={<TankerStaffPage />} />
                   <Route path="users/tanker" element={<TankerUsersPage />} />
+                </Route>
+                <Route element={<RequireModule module="seva" />}>
+                  <Route path="seva" element={<SevaStaffPage />} />
                 </Route>
                 {/* Shared by parking + tanker staff — role check is inside the page */}
                 <Route path="content" element={<ContentCmsPage />} />
@@ -76,6 +87,7 @@ export default function App() {
                   <Route path="customer" element={<CustomerHomePage />} />
                   <Route path="customer/search" element={<CustomerSearchPage />} />
                   <Route path="customer/bookings" element={<CustomerBookingsPage />} />
+                  <Route path="customer/invoices" element={<ParkingInvoicesPage audience="customer" />} />
                   <Route path="customer/wallet" element={<WalletPage />} />
                   <Route path="customer/payment/return" element={<PaymentReturnPage />} />
                   <Route path="customer/tanker" element={<Navigate to="/app/tanker" replace />} />
@@ -86,6 +98,7 @@ export default function App() {
                   <Route path="owner" element={<OwnerHomePage />} />
                   <Route path="owner/listings" element={<ListingsPage />} />
                   <Route path="owner/bookings" element={<OwnerBookingsPage />} />
+                  <Route path="owner/invoices" element={<ParkingInvoicesPage audience="owner" />} />
                   <Route path="owner/wallet" element={<WalletPage />} />
                 </Route>
                 <Route element={<RequireModule module="tanker" />}>
@@ -102,6 +115,20 @@ export default function App() {
                   <Route path="supplier/wallet" element={<WalletPage />} />
                   <Route path="supplier/profile" element={<TankerSupplierPage />} />
                   <Route path="driver" element={<TankerDriverPage />} />
+                </Route>
+                <Route element={<RequireModule module="seva" />}>
+                  <Route path="seva" element={<SevaCustomerPage section="search" />} />
+                  <Route path="seva/bookings" element={<SevaCustomerPage section="bookings" />} />
+                  <Route path="seva/invoices" element={<SevaCustomerPage section="invoices" />} />
+                  <Route path="seva/payment/return" element={<PaymentReturnPage />} />
+                  <Route path="provider" element={<SevaProviderPage />} />
+                  <Route path="provider/offerings" element={<SevaProviderPage />} />
+                  <Route path="provider/workers" element={<SevaProviderPage />} />
+                  <Route path="provider/requests" element={<SevaProviderPage />} />
+                  <Route path="provider/jobs" element={<SevaProviderPage />} />
+                  <Route path="provider/invoices" element={<SevaProviderPage />} />
+                  <Route path="provider/wallet" element={<WalletPage />} />
+                  <Route path="worker" element={<SevaWorkerPage />} />
                 </Route>
               </Route>
             </Route>

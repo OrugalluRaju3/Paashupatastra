@@ -115,7 +115,7 @@ type LoginGate =
  * Signup skips this (roles are assigned after verify).
  */
 function gateLoginAccess(input: {
-  module: "parking" | "tanker";
+  module: "parking" | "tanker" | "seva";
   portal?: string;
   intent?: string;
   roles: string[];
@@ -129,8 +129,8 @@ function gateLoginAccess(input: {
       statusCode: 403,
       code: "ACCOUNT_DISABLED",
       message: reason
-        ? `Your account is inactive. Reason: ${reason}. Contact Parking Super Admin to reactivate.`
-        : "Your account is inactive. Contact support or Parking Super Admin to reactivate.",
+        ? `Your account is inactive. Reason: ${reason}. Contact support to reactivate.`
+        : "Your account is inactive. Contact support to reactivate.",
     };
   }
 
@@ -177,6 +177,26 @@ function gateLoginAccess(input: {
           statusCode: 403,
           code: "ROLE_MISMATCH",
           message: `This mobile does not have ${intent.replaceAll("_", " ")} access.`,
+        };
+      }
+      return { ok: true };
+    }
+
+    if (module === "seva") {
+      if (!hasRole(roles, UserRole.SEVA_SUPER_ADMIN)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message: "This mobile is not registered as Seva staff.",
+        };
+      }
+      if (intent === UserRole.SEVA_SUPER_ADMIN && !hasRole(roles, UserRole.SEVA_SUPER_ADMIN)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message: "This mobile does not have Seva Super Admin access.",
         };
       }
       return { ok: true };
@@ -230,7 +250,42 @@ function gateLoginAccess(input: {
       ok: false,
       statusCode: 400,
       code: "INVALID_INTENT",
-      message: "Use Tanker login for supplier/driver roles.",
+      message: "Use Tanker or Seva login for supplier/driver/provider/worker roles.",
+    };
+  }
+
+  if (module === "seva") {
+    if (intent === "provider") {
+      if (!hasRole(roles, UserRole.SEVA_PROVIDER)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message: "This mobile is not registered as a Seva provider. Sign up as Provider first.",
+        };
+      }
+      return { ok: true };
+    }
+    if (intent === "customer") {
+      if (!hasRole(roles, UserRole.CUSTOMER)) {
+        return {
+          ok: false,
+          statusCode: 403,
+          code: "ROLE_MISMATCH",
+          message: "This mobile is not registered as a Seva customer. Sign up first.",
+        };
+      }
+      return { ok: true };
+    }
+    if (intent === "worker") {
+      // Worker may exist after a provider listed this phone; role is assigned then.
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "INVALID_INTENT",
+      message: "Use Parking or Tanker login for owner/supplier/driver roles.",
     };
   }
 
@@ -441,6 +496,99 @@ async function main() {
         });
       }
 
+      if (module === "seva") {
+        const user = await userRepo.findOne({ where: { phone: body.phone } });
+
+        if (isLogin) {
+          if (!user) {
+            return reply.code(404).send({
+              error: {
+                code: "USER_NOT_FOUND",
+                message:
+                  "This mobile is not registered for Seva. Sign up first, or check the number.",
+              },
+            });
+          }
+          const gate = gateLoginAccess({
+            module: "seva",
+            portal: body.portal,
+            intent: body.intent,
+            roles: user.roles ?? [],
+            isActive: user.isActive,
+            deactivationReason: user.deactivationReason,
+          });
+          if (!gate.ok) {
+            return reply.code(gate.statusCode).send({
+              error: { code: gate.code, message: gate.message },
+            });
+          }
+        }
+
+        if (body.email) {
+          if (user?.name && user.email) {
+            return reply.code(409).send({
+              error: {
+                code: "ALREADY_REGISTERED",
+                message: "This mobile is already registered. Please login instead.",
+              },
+            });
+          }
+          const emailOwner = await userRepo
+            .createQueryBuilder("u")
+            .where("LOWER(u.email) = :email", { email: body.email.trim().toLowerCase() })
+            .getOne();
+          if (emailOwner && emailOwner.phone !== body.phone) {
+            return reply.code(409).send({
+              error: {
+                code: "DUPLICATE_EMAIL",
+                message: "This email is already registered with another account.",
+              },
+            });
+          }
+        }
+
+        const otp = generateOtp();
+        await otpRepo.save(
+          otpRepo.create({
+            phone: body.phone,
+            module: "seva",
+            otp,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+            consumedAt: null,
+          }),
+        );
+        if (isLogin) {
+          rememberLoginContext({
+            phone: body.phone,
+            module: "seva",
+            otp,
+            portal: body.portal,
+            intent: body.intent,
+          });
+        }
+
+        const deliveredVia = await deliverOtp({
+          phone: body.phone,
+          otp,
+          user,
+          fallbackEmail: body.email,
+          log: app.log,
+        });
+
+        app.log.info({ phone: body.phone, module, purpose, deliveredVia }, "OTP requested");
+
+        const exposeDebug = process.env.EXPOSE_DEBUG_OTP === "true";
+        const emailed = Boolean(user?.email || body.email);
+        return reply.code(200).send({
+          ok: true,
+          message: emailed
+            ? "OTP sent to your email"
+            : "OTP generated — check SMS / contact admin if email is missing",
+          deliveredVia,
+          debugOtp: exposeDebug ? otp : undefined,
+        });
+      }
+
       const user = await userRepo.findOne({ where: { phone: body.phone } });
 
       if (isLogin) {
@@ -611,6 +759,57 @@ async function main() {
           };
         }
 
+        if (module === "seva") {
+          let user = await userRepo.findOne({ where: { phone: body.phone } });
+
+          if (isLogin) {
+            if (!user) {
+              return reply.code(404).send({
+                error: {
+                  code: "USER_NOT_FOUND",
+                  message: "This mobile is not registered for Seva.",
+                },
+              });
+            }
+            const gate = gateLoginAccess({
+              module: "seva",
+              portal,
+              intent,
+              roles: user.roles ?? [],
+              isActive: user.isActive,
+              deactivationReason: user.deactivationReason,
+            });
+            if (!gate.ok) {
+              return reply.code(gate.statusCode).send({
+                error: { code: gate.code, message: gate.message },
+              });
+            }
+          } else if (!user) {
+            user = await userRepo.save(
+              userRepo.create({
+                phone: body.phone,
+                name: null,
+                email: null,
+                roles: [UserRole.CUSTOMER],
+                isActive: true,
+              }),
+            );
+          }
+
+          latest.consumedAt = new Date();
+          await otpRepo.save(latest);
+          forgetLoginContext(body.phone, module, body.otp);
+
+          const accessToken = Buffer.from(
+            JSON.stringify({ sub: String(user!.id), roles: user!.roles, module: "seva" }),
+          ).toString("base64url");
+
+          return {
+            accessToken,
+            user: serializeUser(user!),
+          };
+        }
+
         let user = await userRepo.findOne({ where: { phone: body.phone } });
 
         if (isLogin) {
@@ -703,6 +902,7 @@ async function main() {
           return { accessToken, user: serializeUser(user) };
         }
 
+        const tokenModule = payload.module === "seva" ? "seva" : "parking";
         const user = await userRepo.findOne({ where: { id: parseEntityId(payload.sub) } });
         if (!user || !user.isActive) {
           return reply.code(401).send({
@@ -711,7 +911,7 @@ async function main() {
         }
 
         const accessToken = Buffer.from(
-          JSON.stringify({ sub: String(user.id), roles: user.roles, module: "parking" }),
+          JSON.stringify({ sub: String(user.id), roles: user.roles, module: tokenModule }),
         ).toString("base64url");
 
         return { accessToken, user: serializeUser(user) };

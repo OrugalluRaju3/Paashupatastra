@@ -7,6 +7,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { useToast } from "../components/Toast";
 import { isParkingSuperAdmin } from "../auth/types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { digitsPhone } from "../lib/phone";
 
 type User = {
   id: string;
@@ -612,7 +613,7 @@ export function UsersPage({ scope = "staff" }: { scope?: UsersScope }) {
                   inputMode="numeric"
                   maxLength={10}
                   value={form.phone}
-                  onChange={(e) => setField("phone", e.target.value.replace(/\D/g, "").slice(0, 10))}
+                  onChange={(e) => setField("phone", digitsPhone(e.target.value))}
                   required
                   pattern="[0-9]{10}"
                   placeholder="10-digit Indian mobile"

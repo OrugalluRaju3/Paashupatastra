@@ -5,6 +5,11 @@ export const phoneSchema = z
   .string()
   .regex(/^\d{10}$/, "Enter a valid 10-digit mobile number");
 
+/** Empty / omitted values become null; otherwise must be a 10-digit mobile. */
+export const optionalPhoneSchema = z
+  .union([z.literal(""), z.null(), z.undefined(), phoneSchema])
+  .transform((v) => (v ? v : null));
+
 export const userSchema = z.object({
   id: z.coerce.number().int().positive(),
   phone: phoneSchema,
@@ -19,7 +24,7 @@ export const userSchema = z.object({
 
 export type User = z.infer<typeof userSchema>;
 
-export const authModuleSchema = z.enum(["parking", "tanker"]);
+export const authModuleSchema = z.enum(["parking", "tanker", "seva"]);
 
 export type AuthModule = z.infer<typeof authModuleSchema>;
 

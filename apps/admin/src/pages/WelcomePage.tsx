@@ -13,8 +13,8 @@ export function WelcomePage() {
           </div>
         </div>
         <p className="auth-sub">
-          Book a parking slot or order a water tanker — pick a service below to sign in as a
-          customer, owner, supplier, or staff.
+          Book parking, order a water tanker, or hire housekeeping &amp; maintenance — pick a
+          service below to sign in as a customer, owner, supplier, provider, or staff.
         </p>
 
         <div className="welcome-actions">
@@ -24,11 +24,17 @@ export function WelcomePage() {
           <Link className="btn btn-primary" to="/login/tanker">
             Water tanker
           </Link>
+          <Link className="btn btn-primary" to="/login/seva">
+            Seva (housekeeping &amp; maintenance)
+          </Link>
           <Link className="btn btn-ghost" to="/staff/login/parking">
             Parking staff
           </Link>
           <Link className="btn btn-ghost" to="/staff/login/tanker">
             Tanker staff
+          </Link>
+          <Link className="btn btn-ghost" to="/staff/login/seva">
+            Seva staff
           </Link>
         </div>
       </div>

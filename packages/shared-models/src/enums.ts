@@ -4,11 +4,14 @@ export const UserRole = {
   SUPER_ADMIN: "super_admin",
   PARKING_SUPER_ADMIN: "parking_super_admin",
   TANKER_SUPER_ADMIN: "tanker_super_admin",
+  SEVA_SUPER_ADMIN: "seva_super_admin",
   VERIFICATION_MANAGER: "verification_manager",
   FIELD_EXECUTIVE: "field_executive",
   PARKING_OWNER: "parking_owner",
   TANKER_SUPPLIER: "tanker_supplier",
   TANKER_DRIVER: "tanker_driver",
+  SEVA_PROVIDER: "seva_provider",
+  SEVA_WORKER: "seva_worker",
   CUSTOMER: "customer",
   APARTMENT_ADMIN: "apartment_admin",
   RESIDENT: "resident",
@@ -19,11 +22,14 @@ export const userRoleSchema = z.enum([
   UserRole.SUPER_ADMIN,
   UserRole.PARKING_SUPER_ADMIN,
   UserRole.TANKER_SUPER_ADMIN,
+  UserRole.SEVA_SUPER_ADMIN,
   UserRole.VERIFICATION_MANAGER,
   UserRole.FIELD_EXECUTIVE,
   UserRole.PARKING_OWNER,
   UserRole.TANKER_SUPPLIER,
   UserRole.TANKER_DRIVER,
+  UserRole.SEVA_PROVIDER,
+  UserRole.SEVA_WORKER,
   UserRole.CUSTOMER,
   UserRole.APARTMENT_ADMIN,
   UserRole.RESIDENT,
@@ -249,3 +255,48 @@ export const tankerOrderStatusSchema = z.enum([
 ]);
 
 export type TankerOrderStatus = z.infer<typeof tankerOrderStatusSchema>;
+
+/** Housekeeping & maintenance (Seva) */
+export const SevaServiceCategory = {
+  HOUSEKEEPING_REGULAR: "housekeeping_regular",
+  HOUSEKEEPING_DEEP: "housekeeping_deep",
+  KITCHEN_BATHROOM: "kitchen_bathroom",
+  ELECTRICAL_MINOR: "electrical_minor",
+  PLUMBING_MINOR: "plumbing_minor",
+  AC_SERVICE: "ac_service",
+} as const;
+
+export const sevaServiceCategorySchema = z.enum([
+  SevaServiceCategory.HOUSEKEEPING_REGULAR,
+  SevaServiceCategory.HOUSEKEEPING_DEEP,
+  SevaServiceCategory.KITCHEN_BATHROOM,
+  SevaServiceCategory.ELECTRICAL_MINOR,
+  SevaServiceCategory.PLUMBING_MINOR,
+  SevaServiceCategory.AC_SERVICE,
+]);
+
+export type SevaServiceCategory = z.infer<typeof sevaServiceCategorySchema>;
+
+export const SevaBookingStatus = {
+  REQUESTED: "requested",
+  ACCEPTED: "accepted",
+  REJECTED: "rejected",
+  SCHEDULED: "scheduled",
+  ON_THE_WAY: "on_the_way",
+  IN_PROGRESS: "in_progress",
+  COMPLETED: "completed",
+  CANCELLED: "cancelled",
+} as const;
+
+export const sevaBookingStatusSchema = z.enum([
+  SevaBookingStatus.REQUESTED,
+  SevaBookingStatus.ACCEPTED,
+  SevaBookingStatus.REJECTED,
+  SevaBookingStatus.SCHEDULED,
+  SevaBookingStatus.ON_THE_WAY,
+  SevaBookingStatus.IN_PROGRESS,
+  SevaBookingStatus.COMPLETED,
+  SevaBookingStatus.CANCELLED,
+]);
+
+export type SevaBookingStatus = z.infer<typeof sevaBookingStatusSchema>;

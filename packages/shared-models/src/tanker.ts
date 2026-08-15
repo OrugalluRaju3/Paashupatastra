@@ -4,11 +4,12 @@ import {
   tankerRequestStatusSchema,
   tankerVehicleStatusSchema,
 } from "./enums";
+import { optionalPhoneSchema, phoneSchema } from "./user";
 
 export const createTankerSupplierSchema = z.object({
   fullName: z.string().min(2).max(120),
   email: z.string().email().optional().nullable(),
-  alternateMobile: z.string().min(10).max(15).optional().nullable(),
+  alternateMobile: optionalPhoneSchema,
   address: z.string().min(3).max(240),
   landmark: z.string().max(120).optional().nullable(),
   city: z.string().min(2).max(80),
@@ -26,7 +27,7 @@ export type CreateTankerSupplierInput = z.infer<typeof createTankerSupplierSchem
 
 export const createTankerVehicleSchema = z.object({
   driverFullName: z.string().min(2).max(120),
-  driverMobile: z.string().min(10).max(15),
+  driverMobile: phoneSchema,
   driverEmail: z.string().email().optional().nullable(),
   vehicleNumber: z.string().min(4).max(20),
   capacityLitres: z.number().int().positive(),

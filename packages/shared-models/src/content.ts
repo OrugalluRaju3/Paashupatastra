@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { optionalPhoneSchema } from "./user";
 
-export const contentModuleSchema = z.enum(["parking", "tanker"]);
+export const contentModuleSchema = z.enum(["parking", "tanker", "seva"]);
 export type ContentModule = z.infer<typeof contentModuleSchema>;
 
 export const termsAudienceSchema = z.enum([
@@ -8,6 +9,8 @@ export const termsAudienceSchema = z.enum([
   "parking_owner",
   "tanker_supplier",
   "tanker_driver",
+  "seva_provider",
+  "seva_worker",
 ]);
 export type TermsAudience = z.infer<typeof termsAudienceSchema>;
 
@@ -17,6 +20,9 @@ export const announcementAudienceSchema = z.enum([
   "tanker_suppliers",
   "tanker_drivers",
   "tanker_admins",
+  "seva_providers",
+  "seva_workers",
+  "seva_admins",
 ]);
 export type AnnouncementAudience = z.infer<typeof announcementAudienceSchema>;
 
@@ -59,8 +65,8 @@ export const updateFaqSchema = upsertFaqSchema.partial().extend({
 export const upsertSupportContactSchema = z.object({
   module: contentModuleSchema,
   supportEmail: z.string().trim().email().optional().nullable(),
-  supportPhone: z.string().trim().max(40).optional().nullable(),
-  whatsappNumber: z.string().trim().max(40).optional().nullable(),
+  supportPhone: optionalPhoneSchema,
+  whatsappNumber: optionalPhoneSchema,
   workingHours: z.string().trim().max(200).optional().nullable(),
   emergencyContact: z.string().trim().max(120).optional().nullable(),
   officeAddress: z.string().trim().max(2000).optional().nullable(),

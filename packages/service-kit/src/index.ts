@@ -92,10 +92,12 @@ export function getUserIdFromHeaders(headers: Record<string, unknown>): string |
   }
 }
 
-/** Read auth module (`parking` | `tanker`) from JWT or x-auth-module header. */
-export function getAuthModuleFromHeaders(headers: Record<string, unknown>): "parking" | "tanker" | null {
+/** Read auth module (`parking` | `tanker` | `seva`) from JWT or x-auth-module header. */
+export function getAuthModuleFromHeaders(
+  headers: Record<string, unknown>,
+): "parking" | "tanker" | "seva" | null {
   const explicit = headers["x-auth-module"];
-  if (explicit === "parking" || explicit === "tanker") return explicit;
+  if (explicit === "parking" || explicit === "tanker" || explicit === "seva") return explicit;
 
   const auth = headers.authorization;
   if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return null;
@@ -103,7 +105,9 @@ export function getAuthModuleFromHeaders(headers: Record<string, unknown>): "par
     const token = auth.slice("Bearer ".length);
     const json = Buffer.from(token, "base64url").toString("utf8");
     const payload = JSON.parse(json) as { module?: string };
-    if (payload.module === "parking" || payload.module === "tanker") return payload.module;
+    if (payload.module === "parking" || payload.module === "tanker" || payload.module === "seva") {
+      return payload.module;
+    }
     return null;
   } catch {
     return null;
@@ -140,9 +144,12 @@ export function notificationAudienceForIntent(intent: string | null | undefined)
   if (value === "customer" || value === "resident" || value === "visitor") return "customer";
   if (value === "supplier" || value === "tanker_supplier") return "supplier";
   if (value === "driver" || value === "tanker_driver") return "driver";
+  if (value === "provider" || value === "seva_provider") return "provider";
+  if (value === "worker" || value === "seva_worker") return "worker";
   if (
     value === "tanker_super_admin" ||
     value === "tanker_admin" ||
+    value === "seva_super_admin" ||
     value === "super_admin" ||
     value === "admin"
   ) {

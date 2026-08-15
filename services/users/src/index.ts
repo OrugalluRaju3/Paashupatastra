@@ -566,6 +566,7 @@ async function main() {
         const roles = new Set(user.roles);
         roles.add(UserRole.CUSTOMER);
         if (body.intent === "owner") roles.add(UserRole.PARKING_OWNER);
+        if (body.intent === "provider") roles.add(UserRole.SEVA_PROVIDER);
         user.roles = [...roles];
 
         return serializeUser(await userRepo.save(user));

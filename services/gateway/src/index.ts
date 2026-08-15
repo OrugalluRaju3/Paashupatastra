@@ -14,6 +14,7 @@ async function main() {
     },
     { prefix: "/v1/tanker", upstream: envString("TANKER_URL", "http://localhost:3007") },
     { prefix: "/v1/content", upstream: envString("CONTENT_URL", "http://localhost:3008") },
+    { prefix: "/v1/seva", upstream: envString("SEVA_URL", "http://localhost:3009") },
   ];
 
   await createService({

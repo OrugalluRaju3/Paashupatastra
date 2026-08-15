@@ -15,6 +15,7 @@ import {
   PARKING_VEHICLE_TYPE_OPTIONS,
   toggleParkingVehicleType,
 } from "../lib/parkingVehicleTypes";
+import { digitsPhone, isValidPhone } from "../lib/phone";
 
 type Mode = "login" | "signup";
 
@@ -113,6 +114,21 @@ const emptySupplier = {
   proofUrl: "",
 };
 
+const emptyProvider = {
+  fullName: "",
+  email: "",
+  alternateMobile: "",
+  address: "",
+  city: "",
+  state: "",
+  country: "IN",
+  pinCode: "",
+  latitude: "",
+  longitude: "",
+  serviceRadiusKm: "10",
+  proofUrl: "",
+};
+
 export function PublicLoginPage({ module }: { module: AuthModule }) {
   const toast = useToast();
   const { token, portal, requestOtp, loginPublic, signupPublic } = useAuth();
@@ -128,25 +144,37 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
   const [customer, setCustomer] = useState(emptyCustomer);
   const [owner, setOwner] = useState(emptyOwner);
   const [supplier, setSupplier] = useState(emptySupplier);
+  const [provider, setProvider] = useState(emptyProvider);
   const [vehicles, setVehicles] = useState<VehicleEntry[]>([emptyVehicleEntry()]);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [termsId, setTermsId] = useState<number | null>(null);
 
   useEffect(() => {
-    if (module === "parking" && (intent === "supplier" || intent === "driver")) {
+    if (module === "parking" && (intent === "supplier" || intent === "driver" || intent === "provider" || intent === "worker")) {
       setIntent("customer");
     }
-    if (module === "tanker" && intent === "owner") {
+    if (module === "tanker" && (intent === "owner" || intent === "provider" || intent === "worker")) {
+      setIntent("customer");
+    }
+    if (module === "seva" && (intent === "owner" || intent === "supplier" || intent === "driver")) {
       setIntent("customer");
     }
     setTermsAccepted(false);
     setTermsId(null);
   }, [module, intent]);
 
-  function signupAudience(): "customer" | "parking_owner" | "tanker_supplier" | "tanker_driver" {
+  function signupAudience():
+    | "customer"
+    | "parking_owner"
+    | "tanker_supplier"
+    | "tanker_driver"
+    | "seva_provider"
+    | "seva_worker" {
     if (intent === "owner") return "parking_owner";
     if (intent === "supplier") return "tanker_supplier";
     if (intent === "driver") return "tanker_driver";
+    if (intent === "provider") return "seva_provider";
+    if (intent === "worker") return "seva_worker";
     return "customer";
   }
 
@@ -171,6 +199,9 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     if (next === "signup" && intent === "driver") {
       setIntent("supplier");
     }
+    if (next === "signup" && intent === "worker") {
+      setIntent("provider");
+    }
     setOtpSent(false);
     setOtp("");
     setOtpHint("");
@@ -180,6 +211,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
   function signupEmail() {
     if (intent === "owner") return owner.email.trim();
     if (intent === "supplier") return supplier.email.trim();
+    if (intent === "provider") return provider.email.trim();
     return customer.email.trim();
   }
 
@@ -206,6 +238,8 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     if (value === "owner") return "Owner";
     if (value === "supplier") return "Water supplier";
     if (value === "driver") return "Tanker driver";
+    if (value === "provider") return "Seva provider";
+    if (value === "worker") return "Seva worker";
     return "Customer";
   }
 
@@ -234,7 +268,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
 
   async function onVerify(e: FormEvent) {
     e.preventDefault();
-    if (mode === "signup" && !termsAccepted) {
+    if (mode === "signup" && !termsAccepted && termsId) {
       toast.error("Please accept the Terms & Conditions to continue");
       return;
     }
@@ -251,9 +285,57 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
         });
         await acceptTermsIfNeeded();
         toast.success(
-          module === "tanker" ? "Tanker customer account created" : "Customer account created successfully",
+          module === "tanker"
+            ? "Tanker customer account created"
+            : module === "seva"
+              ? "Seva customer account created"
+              : "Customer account created successfully",
         );
         navigate(publicHomePath(intent, module));
+        return;
+      }
+
+      if (mode === "signup" && intent === "provider") {
+        const lat = provider.latitude.trim() ? Number(provider.latitude) : null;
+        const lng = provider.longitude.trim() ? Number(provider.longitude) : null;
+        if (provider.latitude.trim() && (!Number.isFinite(lat) || !Number.isFinite(lng))) {
+          throw new Error("Enter valid latitude and longitude");
+        }
+        if (provider.alternateMobile.trim() && !isValidPhone(provider.alternateMobile.trim())) {
+          throw new Error("Enter a valid 10-digit alternate mobile number");
+        }
+        const radius = Number(provider.serviceRadiusKm || 10);
+        if (!Number.isFinite(radius) || radius <= 0) {
+          throw new Error("Enter a valid service radius in km");
+        }
+
+        await signupPublic(phone, otp, "provider", module, {
+          fullName: provider.fullName.trim(),
+          email: provider.email.trim(),
+          city: provider.city.trim(),
+          state: provider.state.trim(),
+          country: provider.country.trim() || "IN",
+          pinCode: provider.pinCode.trim(),
+        });
+
+        await api.post("/seva/providers/register", {
+          fullName: provider.fullName.trim(),
+          email: provider.email.trim() || null,
+          alternateMobile: provider.alternateMobile.trim() || null,
+          address: provider.address.trim(),
+          city: provider.city.trim(),
+          state: provider.state.trim(),
+          country: provider.country.trim() || "IN",
+          pinCode: provider.pinCode.trim(),
+          latitude: lat,
+          longitude: lng,
+          serviceRadiusKm: Math.round(radius),
+          proofUrl: provider.proofUrl.trim() || null,
+        });
+
+        await acceptTermsIfNeeded();
+        toast.success("Seva provider account created");
+        navigate(publicHomePath("provider", module));
         return;
       }
 
@@ -438,16 +520,27 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
     }
   }
 
-  const wide = mode === "signup" && (intent === "owner" || intent === "supplier");
+  const wide = mode === "signup" && (intent === "owner" || intent === "supplier" || intent === "provider");
 
-  const productLabel = module === "tanker" ? "Water tanker" : "Parking";
+  const productLabel =
+    module === "tanker"
+      ? "Water tanker"
+      : module === "seva"
+        ? "Seva — housekeeping & maintenance"
+        : "Parking";
 
   return (
     <div className="auth-page">
       <div className={wide ? "auth-card auth-card-wide" : "auth-card"}>
         <p className="brand-kicker">Paashupatastra · {productLabel}</p>
         <h1>
-          {mode === "signup" ? `Create ${productLabel.toLowerCase()} account` : `${productLabel} login`}
+          {mode === "signup"
+            ? module === "seva"
+              ? "Create Seva account"
+              : `Create ${productLabel.toLowerCase()} account`
+            : module === "seva"
+              ? "Seva login"
+              : `${productLabel} login`}
         </h1>
         <p className="auth-sub">
           {mode === "signup"
@@ -455,10 +548,16 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
               ? "Register as an apartment parking owner with full listing details."
               : intent === "supplier"
                 ? "Register as a water tanker supplier with fleet and drivers."
-                : module === "tanker"
-                  ? "Sign up as a water tanker customer."
-                  : "Sign up as a parking customer."
-            : "Login with your registered mobile number."}
+                : intent === "provider"
+                  ? "Register as a housekeeping & maintenance provider."
+                  : module === "tanker"
+                    ? "Sign up as a water tanker customer."
+                    : module === "seva"
+                      ? "Sign up to book housekeeping and maintenance services."
+                      : "Sign up as a parking customer."
+            : module === "seva"
+              ? "Login for housekeeping & maintenance — customer, provider, or worker."
+              : "Login with your registered mobile number."}
         </p>
 
         <div className="intent-tabs">
@@ -511,6 +610,24 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
               onClick={() => setIntent("driver")}
             >
               Tanker driver
+            </button>
+          ) : null}
+          {module === "seva" ? (
+            <button
+              type="button"
+              className={intent === "provider" ? "intent active" : "intent"}
+              onClick={() => setIntent("provider")}
+            >
+              Provider
+            </button>
+          ) : null}
+          {module === "seva" && mode === "login" ? (
+            <button
+              type="button"
+              className={intent === "worker" ? "intent active" : "intent"}
+              onClick={() => setIntent("worker")}
+            >
+              Worker
             </button>
           ) : null}
         </div>
@@ -583,6 +700,115 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                     />
                   </div>
                 </div>
+              </>
+            ) : null}
+
+            {mode === "signup" && intent === "provider" ? (
+              <>
+                <div className="field">
+                  <label htmlFor="p-name">Full name</label>
+                  <input
+                    id="p-name"
+                    required
+                    minLength={2}
+                    value={provider.fullName}
+                    onChange={(e) => setProvider({ ...provider, fullName: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="p-email">Email</label>
+                  <input
+                    id="p-email"
+                    type="email"
+                    required
+                    value={provider.email}
+                    onChange={(e) => setProvider({ ...provider, email: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="p-alt">Alternate mobile (optional)</label>
+                  <input
+                    id="p-alt"
+                    inputMode="numeric"
+                    maxLength={10}
+                    placeholder="10-digit mobile"
+                    value={provider.alternateMobile}
+                    onChange={(e) =>
+                      setProvider({
+                        ...provider,
+                        alternateMobile: digitsPhone(e.target.value),
+                      })
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="p-address">Service address</label>
+                  <input
+                    id="p-address"
+                    required
+                    minLength={3}
+                    value={provider.address}
+                    onChange={(e) => setProvider({ ...provider, address: e.target.value })}
+                  />
+                </div>
+                <div className="form-row">
+                  <div className="field">
+                    <label htmlFor="p-city">City</label>
+                    <input
+                      id="p-city"
+                      required
+                      value={provider.city}
+                      onChange={(e) => setProvider({ ...provider, city: e.target.value })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="p-state">State</label>
+                    <input
+                      id="p-state"
+                      required
+                      value={provider.state}
+                      onChange={(e) => setProvider({ ...provider, state: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="field">
+                    <label htmlFor="p-pin">PIN code</label>
+                    <input
+                      id="p-pin"
+                      required
+                      value={provider.pinCode}
+                      onChange={(e) => setProvider({ ...provider, pinCode: e.target.value })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="p-radius">Service radius (km)</label>
+                    <input
+                      id="p-radius"
+                      type="number"
+                      min={1}
+                      max={100}
+                      required
+                      value={provider.serviceRadiusKm}
+                      onChange={(e) => setProvider({ ...provider, serviceRadiusKm: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <GeoCoordFields
+                  idPrefix="sp"
+                  active={mode === "signup" && intent === "provider"}
+                  required={false}
+                  latitude={provider.latitude}
+                  longitude={provider.longitude}
+                  onChange={({ latitude, longitude }) =>
+                    setProvider((p) => ({ ...p, latitude, longitude }))
+                  }
+                />
+                <FileUploadField
+                  label="Proof document (optional)"
+                  value={provider.proofUrl}
+                  onChange={(url) => setProvider({ ...provider, proofUrl: url })}
+                />
               </>
             ) : null}
 
@@ -1283,7 +1509,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                 required
                 placeholder="10-digit mobile"
                 value={phone}
-                onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                onChange={(e) => setPhone(digitsPhone(e.target.value))}
               />
             </div>
             <button className="btn btn-primary" type="submit" disabled={loading || phone.length !== 10}>
@@ -1322,7 +1548,9 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
                     ? "Verify & submit owner registration"
                     : intent === "supplier"
                       ? "Verify & complete supplier registration"
-                      : "Create customer account"
+                      : intent === "provider"
+                        ? "Verify & complete provider registration"
+                        : "Create customer account"
                   : `Continue as ${intentLabel(intent)}`}
             </button>
             <button
@@ -1341,7 +1569,7 @@ export function PublicLoginPage({ module }: { module: AuthModule }) {
         <p className="auth-switch">
           <Link to="/">← Back to product choice</Link>
           {" · "}
-          Staff? Use Parking staff or Tanker staff on the home page.
+          Staff? Use Parking, Tanker, or Seva staff on the home page.
         </p>
       </div>
     </div>

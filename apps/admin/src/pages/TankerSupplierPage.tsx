@@ -14,6 +14,7 @@ import {
   type ShareLocationHandle,
 } from "../lib/shareTankerLocation";
 import { DEFAULT_TANKER_WATER_TYPE, TANKER_WATER_TYPE_OPTIONS } from "../lib/tankerWaterTypes";
+import { digitsPhone, isValidPhone } from "../lib/phone";
 import type { Paginated } from "../types";
 
 type Supplier = {
@@ -219,8 +220,11 @@ function ProfileFormFields({
           <label htmlFor={`${idPrefix}-alt`}>Alternate mobile</label>
           <input
             id={`${idPrefix}-alt`}
+            inputMode="numeric"
+            maxLength={10}
+            placeholder="10-digit mobile"
             value={profileForm.alternateMobile}
-            onChange={(e) => setProfileForm((f) => ({ ...f, alternateMobile: e.target.value }))}
+            onChange={(e) => setProfileForm((f) => ({ ...f, alternateMobile: digitsPhone(e.target.value) }))}
           />
         </div>
       </div>
@@ -505,6 +509,9 @@ export function TankerSupplierPage() {
     if (profileForm.longitude && !Number.isFinite(lng)) {
       throw new Error("Enter a valid longitude");
     }
+    if (profileForm.alternateMobile.trim() && !isValidPhone(profileForm.alternateMobile.trim())) {
+      throw new Error("Enter a valid 10-digit alternate mobile number");
+    }
     return {
       fullName: profileForm.fullName.trim(),
       email: profileForm.email.trim() || null,
@@ -569,6 +576,10 @@ export function TankerSupplierPage() {
     }
     if (!Number.isFinite(amountInr) || amountInr < 0) {
       toast.error("Enter a valid amount in INR");
+      return;
+    }
+    if (!isValidPhone(vehicleForm.driverMobile.trim())) {
+      toast.error("Enter a valid 10-digit driver mobile number");
       return;
     }
     setSavingVehicle(true);
@@ -1463,9 +1474,12 @@ export function TankerSupplierPage() {
                 <input
                   id="v-mobile"
                   required
+                  inputMode="numeric"
+                  maxLength={10}
                   minLength={10}
+                  placeholder="10-digit mobile"
                   value={vehicleForm.driverMobile}
-                  onChange={(e) => setVehicleForm((f) => ({ ...f, driverMobile: e.target.value }))}
+                  onChange={(e) => setVehicleForm((f) => ({ ...f, driverMobile: digitsPhone(e.target.value) }))}
                 />
               </div>
             </div>
